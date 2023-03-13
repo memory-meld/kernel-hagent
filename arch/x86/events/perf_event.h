@@ -276,6 +276,7 @@ struct cpu_hw_events {
 	u64			pebs_data_cfg;
 	u64			active_pebs_data_cfg;
 	int			pebs_record_size;
+	u64			pebs_load_latency_threshold;
 
 	/* Intel Fixed counter configuration */
 	u64			fixed_ctrl_val;

@@ -210,6 +210,21 @@ static int pmc_reprogram_counter(struct kvm_pmc *pmc, u32 type, u64 config,
 		 * in the PEBS record is calibrated on the guest side.
 		 */
 		attr.precise_ip = pmc_get_pebs_precise_level(pmc);
+
+		/*
+		 * Ad-hoc patching of extra register needed by load latency event:
+		 * Need to set MSR_PEBS_LD_LAT_THRESHOLD via attr.config1
+		 * for MEM_TANS_RETIRED.LOAD_LATENCY_GT_*
+		 * see: x86_pmu_extra_regs() and intel_icl_extra_regs
+		 */
+		if (0x01cd == (attr.config & (ARCH_PERFMON_EVENTSEL_EVENT |
+					      ARCH_PERFMON_EVENTSEL_UMASK)) &&
+		    pmu->pebs_load_latency_threshold) {
+			attr.config1 = pmu->pebs_load_latency_threshold;
+			attr.precise_ip = 3;
+		}
+		if (pmu->pebs_data_cfg & PEBS_DATACFG_MEMINFO)
+			attr.sample_type |= PERF_PEBS_MEMINFO_TYPE;
 	}
 
 	event = perf_event_create_kernel_counter(&attr, -1, current,

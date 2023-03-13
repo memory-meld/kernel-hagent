@@ -1178,12 +1178,6 @@ static void adaptive_pebs_record_size_update(void)
 	cpuc->pebs_record_size = sz;
 }
 
-#define PERF_PEBS_MEMINFO_TYPE	(PERF_SAMPLE_ADDR | PERF_SAMPLE_DATA_SRC |   \
-				PERF_SAMPLE_PHYS_ADDR |			     \
-				PERF_SAMPLE_WEIGHT_TYPE |		     \
-				PERF_SAMPLE_TRANSACTION |		     \
-				PERF_SAMPLE_DATA_PAGE_SIZE)
-
 static u64 pebs_update_adaptive_cfg(struct perf_event *event)
 {
 	struct perf_event_attr *attr = &event->attr;
@@ -1346,6 +1340,10 @@ void intel_pmu_pebs_enable(struct perf_event *event)
 		cpuc->pebs_enabled |= 1ULL << (hwc->idx + 32);
 	else if (event->hw.flags & PERF_X86_EVENT_PEBS_ST)
 		cpuc->pebs_enabled |= 1ULL << 63;
+
+	if (hwc->extra_reg.reg == MSR_PEBS_LD_LAT_THRESHOLD &&
+	    hwc->extra_reg.config)
+		cpuc->pebs_load_latency_threshold = hwc->extra_reg.config;
 
 	if (x86_pmu.intel_cap.pebs_baseline) {
 		hwc->config |= ICL_EVENTSEL_ADAPTIVE;
@@ -2049,7 +2047,7 @@ __intel_pmu_pebs_event(struct perf_event *event,
 	struct x86_perf_regs perf_regs;
 	struct pt_regs *regs = &perf_regs.regs;
 	void *at = get_next_pebs_record_by_bit(base, top, bit);
-	static struct pt_regs dummy_iregs;
+	struct pt_regs dummy_iregs;
 
 	if (hwc->flags & PERF_X86_EVENT_AUTO_RELOAD) {
 		/*
@@ -2065,9 +2063,17 @@ __intel_pmu_pebs_event(struct perf_event *event,
 	if (!iregs)
 		iregs = &dummy_iregs;
 
+	// We shoule not hardcode the overflow_handler perf_event_output
+	perf_overflow_handler_t	overflow_handler = READ_ONCE(event->overflow_handler);
+	// In setup_pebs_adaptive_sample_data(), regs is only useful
+	// when PERF_SAMPLE_REGS_INTR is set. Borrow it to store index.
+	bool batch_index = iregs == &dummy_iregs &&
+		    !(event->attr.sample_type & PERF_SAMPLE_REGS_INTR);
 	while (count > 1) {
 		setup_sample(event, iregs, at, data, regs);
-		perf_event_output(event, data, regs);
+		if (batch_index)
+			regs->cx = count - 1;
+		overflow_handler(event, data, regs);
 		at += cpuc->pebs_record_size;
 		at = get_next_pebs_record_by_bit(at, top, bit);
 		count--;
@@ -2081,7 +2087,9 @@ __intel_pmu_pebs_event(struct perf_event *event,
 		 * last record the same as other PEBS records, and doesn't
 		 * invoke the generic overflow handler.
 		 */
-		perf_event_output(event, data, regs);
+		if (batch_index)
+			regs->cx = count - 1;
+		overflow_handler(event, data, regs);
 	} else {
 		/*
 		 * All but the last records are processed.

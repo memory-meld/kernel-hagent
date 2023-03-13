@@ -4172,6 +4172,12 @@ static struct perf_guest_switch_msr *intel_guest_get_msrs(int *nr, void *data)
 		};
 	}
 
+	arr[(*nr)++] = (struct perf_guest_switch_msr){
+		.msr = MSR_PEBS_LD_LAT_THRESHOLD,
+		.host = (unsigned long)cpuc->pebs_load_latency_threshold,
+		.guest = kvm_pmu->pebs_load_latency_threshold,
+	};
+
 	pebs_enable = (*nr)++;
 	arr[pebs_enable] = (struct perf_guest_switch_msr){
 		.msr = MSR_IA32_PEBS_ENABLE,

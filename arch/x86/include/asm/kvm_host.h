@@ -574,6 +574,7 @@ struct kvm_pmu {
 	u64 pebs_enable_mask;
 	u64 pebs_data_cfg;
 	u64 pebs_data_cfg_mask;
+	u64 pebs_load_latency_threshold;
 
 	/*
 	 * If a guest counter is cross-mapped to host counter with different
