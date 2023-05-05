@@ -1365,8 +1365,9 @@ DEFINE_PER_CPU(u64 [X86_PMC_IDX_MAX], pmc_prev_left);
 int x86_perf_event_set_period(struct perf_event *event)
 {
 	struct hw_perf_event *hwc = &event->hw;
-	s64 left = local64_read(&hwc->period_left);
-	s64 period = hwc->sample_period;
+	int shift = 64 - x86_pmu.cntval_bits;
+	s64 left = (s64)(local64_read(&hwc->period_left) << shift) >> shift;
+	s64 period = (s64)(hwc->sample_period << shift) >> shift;
 	int ret = 0, idx = hwc->idx;
 
 	if (unlikely(!hwc->event_base))
