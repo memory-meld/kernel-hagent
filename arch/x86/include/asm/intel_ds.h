@@ -3,8 +3,8 @@
 
 #include <linux/percpu-defs.h>
 
-#define BTS_BUFFER_SIZE		(PAGE_SIZE << 4)
-#define PEBS_BUFFER_SIZE	(PAGE_SIZE << 4)
+#define BTS_BUFFER_SIZE (PAGE_SIZE << 10)
+#define PEBS_BUFFER_SIZE (PAGE_SIZE << 10)
 
 /* The maximal number of PEBS events: */
 #define MAX_PEBS_EVENTS_FMT4	8
