@@ -116,6 +116,7 @@ void si_meminfo_node(struct sysinfo *val, int nid)
 #endif
 	val->mem_unit = PAGE_SIZE;
 }
+EXPORT_SYMBOL(si_meminfo_node);
 #endif
 
 /*
