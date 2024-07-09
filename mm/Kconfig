@@ -1251,4 +1251,6 @@ config EXECMEM
 
 source "mm/damon/Kconfig"
 
+source "mm/hagent/Kconfig"
+
 endmenu

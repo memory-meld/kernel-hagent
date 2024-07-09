@@ -1,0 +1,17 @@
+config HAGENT
+        tristate "Heterogeneous memory agent"
+        default m
+        select PRIME_NUMBERS
+        help
+          Enable heterogeneous memory guest agent to rebalance memory across different memory media.
+
+config EXCHANGE
+	bool "Page exchange"
+	default y
+	depends on MIGRATION
+
+config EXCHANGE_TEST
+	tristate "Page exchange test" if !KUNIT_ALL_TESTS
+	depends on EXCHANGE && KUNIT=y
+	default KUNIT_ALL_TESTS
+
