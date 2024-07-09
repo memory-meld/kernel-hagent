@@ -266,6 +266,12 @@ static inline unsigned int __first_node(const nodemask_t *srcp)
 	return min_t(unsigned int, MAX_NUMNODES, find_first_bit(srcp->bits, MAX_NUMNODES));
 }
 
+#define last_node(src) __last_node(&(src))
+static inline unsigned int __last_node(const nodemask_t *srcp)
+{
+	return min_t(unsigned int, MAX_NUMNODES, find_last_bit(srcp->bits, MAX_NUMNODES));
+}
+
 #define next_node(n, src) __next_node((n), &(src))
 static inline unsigned int __next_node(int n, const nodemask_t *srcp)
 {
