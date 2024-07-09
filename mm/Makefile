@@ -140,4 +140,6 @@ obj-$(CONFIG_GENERIC_IOREMAP) += ioremap.o
 obj-$(CONFIG_SHRINKER_DEBUG) += shrinker_debug.o
 obj-$(CONFIG_EXECMEM) += execmem.o
 
+obj-$(CONFIG_EXCHANGE) += exchange.o
+obj-$(CONFIG_EXCHANGE_TEST) += exchange_test.o
 obj-$(CONFIG_HAGENT) += hagent/

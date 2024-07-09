@@ -378,7 +378,7 @@ unlock:
 }
 #endif
 
-static int folio_expected_refs(struct address_space *mapping,
+int folio_expected_refs(struct address_space *mapping,
 		struct folio *folio)
 {
 	int refs = 1;
@@ -711,7 +711,7 @@ EXPORT_SYMBOL(migrate_folio);
 
 #ifdef CONFIG_BUFFER_HEAD
 /* Returns true if all buffers are successfully locked */
-static bool buffer_migrate_lock_buffers(struct buffer_head *head,
+bool buffer_migrate_lock_buffers(struct buffer_head *head,
 							enum migrate_mode mode)
 {
 	struct buffer_head *bh = head;
@@ -887,7 +887,7 @@ EXPORT_SYMBOL_GPL(filemap_migrate_folio);
 /*
  * Writeback a folio to clean the dirty state
  */
-static int writeout(struct address_space *mapping, struct folio *folio)
+int writeout(struct address_space *mapping, struct folio *folio)
 {
 	struct writeback_control wbc = {
 		.sync_mode = WB_SYNC_NONE,
@@ -2424,7 +2424,7 @@ static int do_pages_stat(struct mm_struct *mm, unsigned long nr_pages,
 	return nr_pages ? -EFAULT : 0;
 }
 
-static struct mm_struct *find_mm_struct(pid_t pid, nodemask_t *mem_nodes)
+struct mm_struct *find_mm_struct(pid_t pid, nodemask_t *mem_nodes)
 {
 	struct task_struct *task;
 	struct mm_struct *mm;

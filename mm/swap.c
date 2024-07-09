@@ -909,6 +909,7 @@ void lru_add_drain_all(void)
 {
 	__lru_add_drain_all(false);
 }
+EXPORT_SYMBOL(lru_add_drain_all);
 #else
 void lru_add_drain_all(void)
 {
