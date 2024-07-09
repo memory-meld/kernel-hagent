@@ -32,7 +32,26 @@ typedef __kernel_timer_t	timer_t;
 typedef __kernel_clockid_t	clockid_t;
 typedef __kernel_mqd_t		mqd_t;
 
-typedef _Bool			bool;
+#define __bool_true_false_are_defined 1
+
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ > 201710L
+/* FIXME: We should be issuing a deprecation warning here, but cannot yet due
+ * to system headers which include this header file unconditionally.
+ */
+#elif !defined(__cplusplus)
+#define bool _Bool
+#define true 1
+#define false 0
+#elif defined(__GNUC__) && !defined(__STRICT_ANSI__)
+/* Define _Bool as a GNU extension. */
+#define _Bool bool
+#if defined(__cplusplus) && __cplusplus < 201103L
+/* For C++98, define bool, false, true as a GNU extension. */
+#define bool bool
+#define false false
+#define true true
+#endif
+#endif
 
 typedef __kernel_uid32_t	uid_t;
 typedef __kernel_gid32_t	gid_t;
