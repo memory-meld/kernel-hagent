@@ -1,0 +1,23 @@
+#ifndef HAGENT_PLACEMENT_MT19937_H
+#define HAGENT_PLACEMENT_MT19937_H
+
+#include <linux/percpu.h>
+
+enum mt19937_config {
+	MT19937_SEED = 0x990124ULL,
+	MT19937_NN = 312,
+	MT19937_MM = 156,
+	MT19937_MATRIX_A = 0xB5026F5AA96619E9ULL,
+	// Most significant 33 bits
+	MT19937_UM = 0xFFFFFFFF80000000ULL,
+	// Least significant 31 bits
+	MT19937_LM = 0x7FFFFFFFULL,
+};
+
+DECLARE_PER_CPU(u64[MT19937_NN], mt19947_mt);
+DECLARE_PER_CPU(u64, mt19947_mti);
+
+// clang-format off
+noinline u64 mt19937(void);
+
+#endif // !HAGENT_PLACEMENT_MT19937_H
