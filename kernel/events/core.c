@@ -7857,6 +7857,7 @@ void perf_prepare_sample(struct perf_sample_data *data,
 		data->sample_flags |= PERF_SAMPLE_AUX;
 	}
 }
+EXPORT_SYMBOL_GPL(perf_prepare_sample);
 
 void perf_prepare_header(struct perf_event_header *header,
 			 struct perf_sample_data *data,
