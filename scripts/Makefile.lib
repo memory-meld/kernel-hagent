@@ -573,6 +573,9 @@ quiet_cmd_zstd = ZSTD    $@
 quiet_cmd_zstd22 = ZSTD22  $@
       cmd_zstd22 = cat $(real-prereqs) | $(ZSTD) -22 --ultra > $@
 
+quiet_cmd_zstd_with_size = ZSTD  $@
+      cmd_zstd_with_size = { cat $(real-prereqs) | $(ZSTD) -T0; $(size_append); } > $@
+
 quiet_cmd_zstd22_with_size = ZSTD22  $@
       cmd_zstd22_with_size = { cat $(real-prereqs) | $(ZSTD) -22 --ultra; $(size_append); } > $@
 
