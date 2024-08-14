@@ -174,6 +174,9 @@ static void hagent_target_work_fn_policy(struct work_struct *work)
 		self->total_samples += total_samples;
 		self->dram_samples += dram_samples;
 		self->pmem_samples += pmem_samples;
+		count_vm_events(PEBS_NR_SAMPLED, total_samples);
+		count_vm_events(PEBS_NR_SAMPLED_FMEM, dram_samples);
+		count_vm_events(PEBS_NR_SAMPLED_SMEM, pmem_samples);
 	}
 	if (self->total_samples > self->next_migration) {
 		self->next_migration += 10000;
