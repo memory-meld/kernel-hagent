@@ -99,7 +99,8 @@ void vector_swap_stack(struct vector *v, size_t i, size_t j)
 }
 void vector_swap(struct vector *v, size_t i, size_t j)
 {
-	VECTOR_CHECK(i < v->len && j < v->len, "swap() out of range");
+	VECTOR_CHECK(i < v->len && j < v->len, "swap() out of range len=%zu i=%zu j=%zu\n",
+		     v->len, i, j);
 	switch (v->elem_size) {
 	case 1:
 		swap(*(u8 *)(v->data + i), *(u8 *)(v->data + j));

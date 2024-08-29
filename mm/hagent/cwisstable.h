@@ -212,14 +212,15 @@ static_assert(false, "This modified version is not compatible with C++.");
 /// the program.
 ///
 /// This is like `assert()` but unconditional.
-#define CWISS_CHECK(cond_, ...)                                              \
-	do {                                                                 \
-		if (cond_)                                                   \
-			break;                                               \
-		pr_err("CWISS_CHECK failed at %s:%d\n", __FILE__, __LINE__); \
-		pr_err(__VA_ARGS__);                                         \
-		dump_stack();                                                \
-		BUG();                                                       \
+#define CWISS_CHECK(cond_, ...)                                               \
+	do {                                                                  \
+		if (cond_)                                                    \
+			break;                                                \
+		pr_err("CWISS_CHECK failed at %s:%d caller %pSR\n", __FILE__, \
+		       __LINE__, __builtin_return_address(0));                \
+		pr_err(__VA_ARGS__);                                          \
+		dump_stack();                                                 \
+		BUG();                                                        \
 	} while (false)
 
 /// `CWISS_DCHECK` is like `CWISS_CHECK` but is disabled by `NDEBUG`.

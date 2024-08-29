@@ -14,6 +14,16 @@
 #include "vector.h"
 #include "cwisstable.h"
 
+#define CHECK_INSERTED(ins, success, ...)                              \
+	({                                                             \
+		HashMapU64U64_Insert __insert = (ins);                 \
+		HashMapU64U64_Entry *__entry =                         \
+			HashMapU64U64_Iter_get(&__insert.iter);        \
+		CWISS_CHECK(__insert.inserted == (success) && __entry, \
+			    __VA_ARGS__);                              \
+		__entry;                                               \
+	})
+
 // clang-format off
 struct kv { u64 k, v; };
 static inline u64 *kv_key(struct kv *kv)	{ return &kv->k; }
@@ -132,8 +142,19 @@ static inline u64 const *kv_cvalue(struct kv const *kv)	{ return &kv->v; }
 
 // HashMapU64U64: A hash map from u64 to u64
 CWISS_DECLARE_FLAT_HASHMAP(HashMapU64U64, u64, u64);
-static inline void HashMapU64U64_swap(HashMapU64U64 *self, u64 const *keyx,
-				      u64 const *keyy)
+noinline static inline HashMapU64U64_Entry *
+HashMapU64U64_update(HashMapU64U64 *self, HashMapU64U64_Entry const *e)
+{
+	HashMapU64U64_Entry *r = CHECK_INSERTED(
+		HashMapU64U64_insert(self, e), false,
+		"cannot update a non-existant entry key=%llx val=%llu", e->key,
+		e->val);
+	r->val = e->val;
+	return r;
+}
+
+noinline static inline void HashMapU64U64_swap(HashMapU64U64 *self,
+					       u64 const *keyx, u64 const *keyy)
 {
 	HashMapU64U64_Iter iterx = HashMapU64U64_find(self, keyx);
 	HashMapU64U64_Entry *x = HashMapU64U64_Iter_get(&iterx);
@@ -141,19 +162,17 @@ static inline void HashMapU64U64_swap(HashMapU64U64 *self, u64 const *keyx,
 		x != NULL,
 		"getting a non-existant entry via keyx from the map keyx=0x%llx keyy=0x%llx",
 		*keyx, *keyy);
+
 	HashMapU64U64_Iter itery = HashMapU64U64_find(self, keyy);
 	HashMapU64U64_Entry *y = HashMapU64U64_Iter_get(&itery);
 	CWISS_CHECK(
 		y != NULL,
-		"getting a non-existant entry via keyy from the map keyx=0x%llx valx=%llu keyy=0x%llx",
-		*keyx, x->val, *keyy);
-	// HashMapU64U64_Entry ex = { keyx, y->val };
-	// HashMapU64U64_insert(self, &ex);
-	// HashMapU64U64_Entry ey = { keyy, x->val };
-	// HashMapU64U64_insert(self, &ey);
+		"getting a non-existant entry via keyy from the map keyx=0x%llx keyy=0x%llx",
+		*keyx, *keyy);
+
 	swap(x->val, y->val);
 }
-static inline HashMapU64U64_Entry *
+noinline static inline HashMapU64U64_Entry *
 HashMapU64U64_get_or_insert(HashMapU64U64 *map, u64 key, u64 val)
 {
 	HashMapU64U64_Iter iter = HashMapU64U64_find(map, &key);
@@ -162,14 +181,12 @@ HashMapU64U64_get_or_insert(HashMapU64U64 *map, u64 key, u64 val)
 		return e;
 	}
 	HashMapU64U64_Entry ne = { key, val };
-	HashMapU64U64_insert(map, &ne);
-	iter = HashMapU64U64_find(map, &key);
-	e = HashMapU64U64_Iter_get(&iter);
-	CWISS_CHECK(e != NULL, "just inserted entry vanished");
-	return e;
+	return CHECK_INSERTED(HashMapU64U64_insert(map, &ne), true,
+			      "insertion failed key=%llx val=%llu", key, val);
 }
 
-// A heap with key-value pair elements which can be find by a key
+// A heap with key-value pair elements which can be find by a key.
+// Defaults to min-heap. Pass greater as the comparator to get a max-heap.
 struct indexable_heap {
 	struct vector values;
 	HashMapU64U64 indices;
@@ -183,19 +200,46 @@ static inline size_t heap_left(size_t i)	{ return 2 * i + 1; }
 static inline size_t heap_right(size_t i)	{ return 2 * i + 2; }
 // clang-format on
 
-static inline void bubble_up(struct indexable_heap *h, size_t i)
+#define CHECK_KV(h, key, value)                                                        \
+	({                                                                             \
+		u64 __key = (key), __value = (value);                                  \
+		HashMapU64U64_Iter __it =                                              \
+			HashMapU64U64_find(&(h)->indices, &__key);                     \
+		HashMapU64U64_Entry *__e = HashMapU64U64_Iter_get(&__it);              \
+		CWISS_CHECK(                                                           \
+			__e != NULL,                                                   \
+			"getting a non-existant entry from the map key=%llx val=%llu", \
+			__key, __value);                                               \
+		CWISS_CHECK(                                                           \
+			__e->val == __value,                                           \
+			"value mismatch key=%llx expected val=%llu got=%llu",          \
+			__key, __value, __e->val);                                     \
+	})
+
+noinline static inline void bubble_up(struct indexable_heap *h, size_t i)
 {
 	while (i > 0 &&
 	       h->less(*kv_cvalue(vector_at(&h->values, i)),
 		       *kv_cvalue(vector_at(&h->values, heap_parent(i))))) {
+		// {
+		// 	size_t p = heap_parent(i);
+		// 	CHECK_KV(h, *kv_ckey(vector_at(&h->values, i)), i);
+		// 	CHECK_KV(h, *kv_ckey(vector_at(&h->values, p)), p);
+		// }
 		HashMapU64U64_swap(
 			&h->indices, kv_ckey(vector_at(&h->values, i)),
 			kv_ckey(vector_at(&h->values, heap_parent(i))));
+
+		// {
+		// 	size_t p = heap_parent(i);
+		// 	CHECK_KV(h, *kv_ckey(vector_at(&h->values, i)), p);
+		// 	CHECK_KV(h, *kv_ckey(vector_at(&h->values, p)), i);
+		// }
 		vector_swap(&h->values, i, heap_parent(i));
 		i = heap_parent(i);
 	}
 }
-static inline void bubble_down(struct indexable_heap *h, size_t i)
+noinline static inline void bubble_down(struct indexable_heap *h, size_t i)
 {
 	while (true) {
 		size_t l = heap_left(i);
@@ -214,9 +258,21 @@ static inline void bubble_down(struct indexable_heap *h, size_t i)
 		if (smallest == i) {
 			break;
 		}
+
+		// {
+		// 	CHECK_KV(h, *kv_ckey(vector_at(&h->values, i)), i);
+		// 	CHECK_KV(h, *kv_ckey(vector_at(&h->values, smallest)),
+		// 		 smallest);
+		// }
 		HashMapU64U64_swap(&h->indices,
 				   kv_ckey(vector_at(&h->values, i)),
 				   kv_ckey(vector_at(&h->values, smallest)));
+		// {
+		// 	CHECK_KV(h, *kv_ckey(vector_at(&h->values, i)),
+		// 		 smallest);
+		// 	CHECK_KV(h, *kv_ckey(vector_at(&h->values, smallest)),
+		// 		 i);
+		// }
 		vector_swap(&h->values, i, smallest);
 		i = smallest;
 	}
@@ -251,56 +307,69 @@ static inline void indexable_heap_make(struct indexable_heap *h)
 	}
 }
 
-static inline void indexable_heap_push(struct indexable_heap *self, u64 key,
-				       u64 value)
+noinline static inline void indexable_heap_push(struct indexable_heap *self,
+						u64 key, u64 value)
 {
 	struct kv kv = { key, value };
 	vector_push_back(&self->values, &kv);
 	HashMapU64U64_Entry e = { key, vector_size(&self->values) - 1 };
-	HashMapU64U64_insert(&self->indices, &e);
+	CWISS_CHECK(CHECK_INSERTED(HashMapU64U64_insert(&self->indices, &e),
+				   true, "insertion failed key=%llx val=%llu",
+				   e.key, e.val)
+				    ->val == e.val,
+		    "value mismatch key=%llx val=%llu", e.key, e.val);
 	bubble_up(self, vector_size(&self->values) - 1);
 }
 
-static inline void indexable_heap_pop(struct indexable_heap *self)
+noinline static inline void indexable_heap_pop(struct indexable_heap *self)
 {
 	CWISS_CHECK(vector_size(&self->values) > 0, "pop() on an empty heap");
 	HashMapU64U64_Entry e = { *kv_ckey(vector_back(&self->values)), 0 };
-	HashMapU64U64_insert(&self->indices, &e);
-	HashMapU64U64_erase(&self->indices,
-			    kv_ckey(vector_front(&self->values)));
+	CWISS_CHECK(HashMapU64U64_update(&self->indices, &e)->val == e.val,
+		    "value mismatch key=%llx val=%llu", e.key, e.val);
+	CWISS_CHECK(HashMapU64U64_erase(&self->indices,
+					kv_ckey(vector_front(&self->values))),
+		    "erasing an non-existant entry from the map key=%llx",
+		    *kv_ckey(vector_front(&self->values)));
 	vector_swap(&self->values, 0, vector_size(&self->values) - 1);
 	vector_pop_back(&self->values);
 	bubble_down(self, 0);
 }
 
-static inline struct kv const *indexable_heap_peek(struct indexable_heap *self)
+noinline static inline struct kv const *
+indexable_heap_peek(struct indexable_heap *self)
 {
-	return vector_at(&self->values, 0);
+	return vector_front(&self->values);
 }
 
-static inline bool indexable_heap_erase(struct indexable_heap *self, u64 key)
+noinline static inline bool indexable_heap_erase(struct indexable_heap *self,
+						 u64 key)
 {
 	HashMapU64U64_Iter it = HashMapU64U64_find(&self->indices, &key);
 	HashMapU64U64_Entry *e = HashMapU64U64_Iter_get(&it);
-	CWISS_CHECK(e != NULL, "erasing a non-existant entry from the map");
-	// if (e == NULL) {
-	// 	return false;
-	// }
+	CWISS_CHECK(e != NULL,
+		    "erasing a non-existant entry from the map key=%llx", key);
 	u64 index = e->val, last = vector_size(&self->values) - 1;
+	CWISS_CHECK(index <= last, "index out of bounds index=%llu last=%llu",
+		    index, last);
+	// If not already the last element, swap with the last element
+	// Manually swap instead of calling HashMapU64U64_swap to save one lookup
 	if (index != last) {
 		HashMapU64U64_Entry be = { *kv_ckey(vector_back(&self->values)),
 					   index };
-		HashMapU64U64_insert(&self->indices, &be);
+		CWISS_CHECK(HashMapU64U64_update(&self->indices, &be)->val,
+			    "value mismatch key=%llx val=%llu", be.key, be.val);
 		vector_swap(&self->values, index, last);
 	}
-	HashMapU64U64_erase(&self->indices, &key);
+	CWISS_CHECK(HashMapU64U64_erase(&self->indices, &key),
+		    "erase failed key=%llx", key);
 	vector_pop_back(&self->values);
 	// bubble_down can handle index == last correctly
 	bubble_down(self, index);
 	return true;
 }
-static inline u64 indexable_heap_inc(struct indexable_heap *self, u64 key,
-				     s64 delta)
+noinline static inline u64 indexable_heap_inc(struct indexable_heap *self,
+					      u64 key, s64 delta)
 {
 	HashMapU64U64_Iter it = HashMapU64U64_find(&self->indices, &key);
 	HashMapU64U64_Entry *e = HashMapU64U64_Iter_get(&it);
@@ -314,8 +383,8 @@ static inline u64 indexable_heap_inc(struct indexable_heap *self, u64 key,
 	return old;
 }
 
-static inline u64 indexable_heap_update(struct indexable_heap *self, u64 key,
-					u64 val)
+noinline static inline u64 indexable_heap_update(struct indexable_heap *self,
+						 u64 key, u64 val)
 {
 	HashMapU64U64_Iter it = HashMapU64U64_find(&self->indices, &key);
 	HashMapU64U64_Entry *e = HashMapU64U64_Iter_get(&it);
@@ -329,7 +398,8 @@ static inline u64 indexable_heap_update(struct indexable_heap *self, u64 key,
 	return old;
 }
 
-static inline bool indexable_heap_contains(struct indexable_heap *self, u64 key)
+noinline static inline bool indexable_heap_contains(struct indexable_heap *self,
+						    u64 key)
 {
 	HashMapU64U64_Iter it = HashMapU64U64_find(&self->indices, &key);
 	return HashMapU64U64_Iter_get(&it) != NULL;
