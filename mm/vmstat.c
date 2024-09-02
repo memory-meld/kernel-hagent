@@ -1327,6 +1327,13 @@ const char * const vmstat_text[] = {
 	"pebs_nr_sampled",
 	"pebs_nr_sampled_fmem",
 	"pebs_nr_sampled_smem",
+	"folio_exchange",
+	"folio_exchange_success",
+	"folio_exchange_failed",
+	"folio_exchange_failed_isolate",
+	"folio_exchange_failed_lock",
+	"folio_exchange_failed_support",
+	"folio_exchange_failed_move",
 #ifdef CONFIG_COMPACTION
 	"compact_migrate_scanned",
 	"compact_free_scanned",

@@ -808,23 +808,35 @@ int folio_exchange_parallel(struct folio *old, struct folio *new,
 	// 4. unmap folio
 
 	CLASS(folio_exchange_isolate, old_isolated)(old, mode);
-	if (IS_ERR_OR_NULL(old_isolated.folio))
+	if (IS_ERR_OR_NULL(old_isolated.folio)) {
+		count_vm_event(FOLIO_EXCHANGE_FAILED_ISOLATE);
 		return -ENOENT;
+	}
 	CLASS(folio_exchange_isolate, new_isolated)(new, mode);
-	if (IS_ERR_OR_NULL(old_isolated.folio))
+	if (IS_ERR_OR_NULL(old_isolated.folio)) {
+		count_vm_event(FOLIO_EXCHANGE_FAILED_ISOLATE);
 		return -ENOENT;
+	}
 
 	CLASS(folio_exchange_lock, old_locked)(old, mode);
-	if (IS_ERR(old_locked))
+	if (IS_ERR(old_locked)) {
+		count_vm_event(FOLIO_EXCHANGE_FAILED_LOCK);
 		return PTR_ERR(old_locked);
+	}
 	CLASS(folio_exchange_lock, new_locked)(new, mode);
-	if (IS_ERR(new_locked))
-		return PTR_ERR(new_locked);
+	if (IS_ERR(new_locked)) {
+		count_vm_event(FOLIO_EXCHANGE_FAILED_LOCK);
+		return PTR_ERR(old_locked);
+	}
+	if (!folio_exchange_supported(old, mode)) {
+		count_vm_event(FOLIO_EXCHANGE_FAILED_SUPPORT);
+		return PTR_ERR(old_locked);
+	}
 
-	if (!folio_exchange_supported(old, mode))
-		return -EOPNOTSUPP;
-	if (!folio_exchange_supported(new, mode))
-		return -EOPNOTSUPP;
+	if (!folio_exchange_supported(new, mode)) {
+		count_vm_event(FOLIO_EXCHANGE_FAILED_SUPPORT);
+		return PTR_ERR(old_locked);
+	}
 
 	CLASS(folio_exchange_unmap, old_unmapped)(old, mode);
 	CLASS(folio_exchange_unmap, new_unmapped)(new, mode);
@@ -832,17 +844,23 @@ int folio_exchange_parallel(struct folio *old, struct folio *new,
 	// TODO: improve TLB flushing via batching
 	try_to_unmap_flush();
 
-	folio_exchange_move(old, new, mode, par);
+	int err = folio_exchange_move(old, new, mode, par);
+	if (err) {
+		count_vm_event(FOLIO_EXCHANGE_FAILED_MOVE);
+	}
 	old_unmapped.dst = new;
 	new_unmapped.dst = old;
 
-	return MIGRATEPAGE_SUCCESS;
+	return err;
 }
 EXPORT_SYMBOL(folio_exchange_parallel);
 
 int folio_exchange(struct folio *old, struct folio *new, enum migrate_mode mode)
 {
-	return folio_exchange_parallel(old, new, mode, PARALLEL_SINGLE);
+	count_vm_event(FOLIO_EXCHANGE);
+	int err = folio_exchange_parallel(old, new, mode, PARALLEL_SINGLE);
+	count_vm_event(err ? FOLIO_EXCHANGE_FAILED : FOLIO_EXCHANGE_SUCCESS);
+	return err;
 }
 EXPORT_SYMBOL(folio_exchange);
 
