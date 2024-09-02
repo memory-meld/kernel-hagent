@@ -21,7 +21,7 @@ extern int folio_exchange(struct folio *old, struct folio *new,
 			  enum migrate_mode mode);
 extern void resolve_folio_cleanup(struct folio **foliop);
 
-static inline void haget_target_event_overflow(struct perf_event *event,
+noinline static inline void hagent_target_event_overflow(struct perf_event *event,
 					       struct perf_sample_data *data,
 					       struct pt_regs *regs)
 {
@@ -65,7 +65,7 @@ static int hagnet_target_events_create(struct hagent_target *self,
 {
 	for (int i = 0; i < EVENT_MAX; ++i) {
 		struct perf_event *e = perf_event_create_kernel_counter(
-			&event_attrs[i], -1, task, haget_target_event_overflow,
+			&event_attrs[i], -1, task, hagent_target_event_overflow,
 			self);
 		if (IS_ERR(e)) {
 			hagnet_target_events_release(self);
@@ -89,7 +89,7 @@ static struct folio *uvirt_to_folio(struct mm_struct *mm, u64 user_addr)
 	// 	return ERR_PTR(-EFAULT);
 	// }
 	struct page *page = follow_page(vma, user_addr, FOLL_GET | FOLL_DUMP);
-	if (IS_ERR(page))
+	if (IS_ERR_OR_NULL(page))
 		return ERR_CAST(page);
 	return page_folio(page);
 }
@@ -101,7 +101,7 @@ static void cleanup_mmput(struct mm_struct **mm)
 	mmput(*mm);
 }
 
-static void hagent_target_work_fn_policy(struct work_struct *work)
+noinline static void hagent_target_work_fn_policy(struct work_struct *work)
 {
 	struct hagent_target *self =
 		container_of(work, typeof(*self), works[THREAD_POLICY].work);
@@ -139,7 +139,7 @@ static void hagent_target_work_fn_policy(struct work_struct *work)
 			if (IS_ERR_OR_NULL(folio)) {
 				continue;
 			}
-			if (folio_mapping(folio)) {
+			if (!folio_test_lru(folio) || folio_mapping(folio)) {
 				// Ignore file pages for now
 				continue;
 			}
@@ -186,7 +186,7 @@ static void hagent_target_work_fn_policy(struct work_struct *work)
 				   1);
 	}
 }
-static void hagent_target_work_fn_migration(struct work_struct *work)
+noinline static void hagent_target_work_fn_migration(struct work_struct *work)
 {
 	struct hagent_target *self =
 		container_of(work, typeof(*self), works[THREAD_MIGRATION].work);
@@ -202,7 +202,7 @@ static void hagent_target_work_fn_migration(struct work_struct *work)
 	// guard(vmevent)(PAGE_MIGRATION_COST);
 	scoped_cond_guard(mutex_try, return, &self->lock)
 	{
-		u64 found_pair = 0, total_exchanges = 0;
+		u64 found_pair = 0, total_exchanges = 0, failed = 0;
 		struct indexable_heap *dheap = &self->heap[DIRECTION_DEMOTION],
 				      *pheap = &self->heap[DIRECTION_PROMOTION];
 		if (self->total_samples > self->next_dump) {
@@ -237,7 +237,7 @@ static void hagent_target_work_fn_migration(struct work_struct *work)
 			}
 			struct folio *src __cleanup(resolve_folio_cleanup) =
 				uvirt_to_folio(mm, dram_vpfn << PAGE_SHIFT);
-			if (IS_ERR_OR_NULL(src)) {
+			if (IS_ERR_OR_NULL(src) || folio_nid(src) != DRAM_NID) {
 				// Remove invalid pfn from the heap to avoid
 				// dead loop
 				indexable_heap_pop(dheap);
@@ -245,7 +245,7 @@ static void hagent_target_work_fn_migration(struct work_struct *work)
 			}
 			struct folio *dst __cleanup(resolve_folio_cleanup) =
 				uvirt_to_folio(mm, pmem_vpfn << PAGE_SHIFT);
-			if (IS_ERR_OR_NULL(dst)) {
+			if (IS_ERR_OR_NULL(dst) || folio_nid(dst) == DRAM_NID) {
 				// Remove invalid pfn from the heap to avoid
 				// dead loop
 				indexable_heap_pop(pheap);
@@ -261,6 +261,7 @@ static void hagent_target_work_fn_migration(struct work_struct *work)
 			// pr_info("%s: ===== EXCHANGE EXECUTING ====", __func__);
 			long err = folio_exchange(src, dst, MIGRATE_SYNC);
 			if (err) {
+				++failed;
 				// clang-format off
 				pr_err("%s: exchange_folio: mode=%d err=%pe [src=%p vaddr=%p pfn=0x%lx] <-> [dst=%p vaddr=%p pfn=0x%lx]",
 				       __func__, MIGRATE_SYNC, ERR_PTR(err),
@@ -269,10 +270,24 @@ static void hagent_target_work_fn_migration(struct work_struct *work)
 				// clang-format on
 				// FIXME: should we put back the folio to the heap so that we can try at an another time?
 			} else {
-				indexable_heap_push(dheap, pmem_vpfn,
-						    pmem_count);
-				indexable_heap_push(pheap, dram_vpfn,
-						    dram_count);
+				// Althoug in theory the folio could only be
+				// backed by DRAM or PMEM, in practive, the
+				// kernel could have done migration in the
+				// background that we are not aware of.
+				if (indexable_heap_contains(dheap, pmem_vpfn)) {
+					indexable_heap_update(dheap, pmem_vpfn,
+							      dram_count);
+				} else {
+					indexable_heap_push(dheap, pmem_vpfn,
+							    dram_count);
+				}
+				if (indexable_heap_contains(pheap, dram_vpfn)) {
+					indexable_heap_update(pheap, dram_vpfn,
+							      pmem_count);
+				} else {
+					indexable_heap_push(pheap, dram_vpfn,
+							    pmem_count);
+				}
 				total_exchanges++;
 				// FIXME: implement additional vmstat counters
 				// count_vm_event(PAGE_PROMOTED);
@@ -282,8 +297,11 @@ static void hagent_target_work_fn_migration(struct work_struct *work)
 			// pr_info("%s: ===== EXCHANGE RETURNED ====", __func__);
 
 			if (found_pair >= migration_batch_size) {
-				pr_info_ratelimited("%s: found pair=%llu",
-						    __func__, found_pair);
+				pr_info_ratelimited(
+					"%s: found pair=%llu failed=%llu\n",
+					__func__,
+					found_pair, failed);
+				break;
 			}
 			// pr_info("%s: next iteration\n", __func__);
 		}
@@ -345,7 +363,7 @@ struct hagent_target *hagent_target_new(pid_t pid)
 	if (!self)
 		return ERR_PTR(-ENOMEM);
 
-	struct task_struct *task = get_pid_task(find_vpid(pid), PIDTYPE_PID);
+	struct task_struct *task = find_get_task_by_vpid(pid);
 	if (!task) {
 		hagent_target_drop(self);
 		return ERR_PTR(-ESRCH);
