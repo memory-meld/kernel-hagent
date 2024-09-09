@@ -2504,10 +2504,9 @@ static inline void CWISS_RawTable_InitializeSlots(const CWISS_Policy *policy,
 	//
 	// NOTE(mcyoung): Not relevant in C but kept in case we decide to do custom
 	// alloc.
-	/*if (std::is_same<SlotAlloc, std::allocator<slot_type>>::value &&
-      slots_ == nullptr) {
-    infoz() = Sample(sizeof(slot_type));
-  }*/
+	// if (std::is_same<SlotAlloc, std::allocator<slot_type>>::value && slots_ == nullptr) {
+	//	infoz() = Sample(sizeof(slot_type));
+	// }
 
 	char *mem = (char *) // Cast for C++.
 		    policy->alloc->alloc(CWISS_AllocSize(self->capacity_,
