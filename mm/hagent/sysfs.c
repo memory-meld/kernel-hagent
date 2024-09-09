@@ -61,7 +61,7 @@ static ssize_t pid_store(struct kobject *kobj, struct kobj_attribute *attr,
 	struct hagent_sysfs_target *t =
 		container_of(kobj, struct hagent_sysfs_target, kobj);
 	int pid, err = kstrtoint(buf, 10, &pid);
-	if (err || pid <= 0) {
+	if (err || pid < -1) {
 		return -EINVAL;
 	}
 	if (!mutex_trylock(&hagent_sysfs_lock)) {
@@ -69,6 +69,10 @@ static ssize_t pid_store(struct kobject *kobj, struct kobj_attribute *attr,
 	}
 	if (t->target) {
 		hagent_target_drop(t->target);
+	}
+	if (pid == -1) {
+		mutex_unlock(&hagent_sysfs_lock);
+		return count;
 	}
 	struct hagent_target *target = hagent_target_new(pid);
 	if (IS_ERR(target)) {
