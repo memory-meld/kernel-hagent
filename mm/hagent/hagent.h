@@ -21,8 +21,8 @@ extern void __exit hagent_sysfs_exit(void);
 extern int __init hagent_sysfs_init(void);
 
 enum {
-	DIRECTION_PROMOTION,
 	DIRECTION_DEMOTION,
+	DIRECTION_PROMOTION,
 	DIRECTION_MAX,
 };
 
@@ -40,6 +40,8 @@ enum {
 	THREAD_MAX,
 };
 
+CWISS_DECLARE_FLAT_HASHMAP(HashMapU64Ptr, u64, void *);
+
 // Represent a hagent management target, i.e. a process.
 struct hagent_target {
 	struct task_struct *task;
@@ -50,6 +52,10 @@ struct hagent_target {
 	};
 	struct perf_event *events[EVENT_MAX];
 	struct mutex lock;
+	// All managed struct folio *
+	struct list_head managed;
+	// vpfn -> struct folio *
+	HashMapU64Ptr map;
 	struct sds sds;
 	struct indexable_heap heap[DIRECTION_MAX];
 	// struct spsc decayed;

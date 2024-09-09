@@ -188,6 +188,7 @@ HashMapU64U64_get_or_insert(HashMapU64U64 *map, u64 key, u64 val)
 // A heap with key-value pair elements which can be find by a key.
 // Defaults to min-heap. Pass greater as the comparator to get a max-heap.
 struct indexable_heap {
+	char const *name;
 	struct vector values;
 	HashMapU64U64 indices;
 	bool (*less)(u64, u64);
@@ -279,18 +280,41 @@ noinline static inline void bubble_down(struct indexable_heap *h, size_t i)
 }
 
 static inline int indexable_heap_init(struct indexable_heap *self,
-				      bool min_heap)
+				      bool min_heap, char const *name)
 {
 	if (vector_new(&self->values, sizeof(struct kv), 128)) {
 		return -ENOMEM;
 	}
+	self->name = name;
 	self->indices = HashMapU64U64_new(32);
 	self->less = min_heap ? less : greater;
 	return 0;
 }
 
+static inline size_t indexable_heap_size(struct indexable_heap *self)
+{
+	return vector_size(&self->values);
+}
+
+static inline bool indexable_heap_empty(struct indexable_heap *self)
+{
+	return indexable_heap_size(self) == 0;
+}
+
+static inline void indexable_heap_dump(struct indexable_heap *self, size_t n)
+{
+	n = min(n, vector_size(&self->values));
+	pr_info("indexable_heap name=%s size=%zu dumping first n=%zu: \n",
+		self->name, vector_size(&self->values), n);
+	for (size_t i = 0; i < n; i++) {
+		struct kv *kv = vector_at(&self->values, i);
+		pr_cont(" (0x%llx, %llu)", kv->k, kv->v);
+	}
+}
+
 static inline void indexable_heap_drop(struct indexable_heap *self)
 {
+	indexable_heap_dump(self, indexable_heap_size(self));
 	HashMapU64U64_destroy(&self->indices);
 	vector_drop(&self->values);
 }
@@ -403,26 +427,6 @@ noinline static inline bool indexable_heap_contains(struct indexable_heap *self,
 {
 	HashMapU64U64_Iter it = HashMapU64U64_find(&self->indices, &key);
 	return HashMapU64U64_Iter_get(&it) != NULL;
-}
-
-static inline size_t indexable_heap_size(struct indexable_heap *self)
-{
-	return vector_size(&self->values);
-}
-
-static inline bool indexable_heap_empty(struct indexable_heap *self)
-{
-	return indexable_heap_size(self) == 0;
-}
-static inline void indexable_heap_dump(struct indexable_heap *self, size_t n)
-{
-	n = min(n, vector_size(&self->values));
-	pr_info("indexable_heap size=%zu dumping first n=%zu: \n",
-		vector_size(&self->values), n);
-	for (size_t i = 0; i < n; i++) {
-		struct kv *kv = vector_at(&self->values, i);
-		pr_cont(" (0x%llx, %llu)", kv->k, kv->v);
-	}
 }
 
 // void indexable_heap_make(struct indexable_heap *heap);

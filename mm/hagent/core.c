@@ -6,6 +6,8 @@
  *
  */
 
+#include <linux/mm.h>
+#include <linux/mm_inline.h>
 #include <linux/slab.h>
 #include <linux/swap.h>
 #include <linux/mempolicy.h>
@@ -19,11 +21,15 @@ extern void perf_prepare_sample(struct perf_sample_data *data,
 				struct perf_event *event, struct pt_regs *regs);
 extern int folio_exchange(struct folio *old, struct folio *new,
 			  enum migrate_mode mode);
+extern int folio_exchange_isolated(struct folio *old, struct folio *new,
+				   enum migrate_mode mode);
+
 extern void resolve_folio_cleanup(struct folio **foliop);
 
-noinline static inline void hagent_target_event_overflow(struct perf_event *event,
-					       struct perf_sample_data *data,
-					       struct pt_regs *regs)
+noinline static inline void
+hagent_target_event_overflow(struct perf_event *event,
+			     struct perf_sample_data *data,
+			     struct pt_regs *regs)
 {
 	struct hagent_target *self = event->overflow_handler_context;
 	bool batch_last = regs->cx == 0;
@@ -73,8 +79,9 @@ static int hagnet_target_events_create(struct hagent_target *self,
 		}
 		self->events[i] = e;
 
-		pr_info("%s: created config=0x%llx\n", __func__,
-			event_attrs[i].config);
+		pr_info("%s: created config=0x%llx sample_period=%lld\n",
+			__func__, event_attrs[i].config,
+			event_attrs[i].sample_period);
 	}
 	return 0;
 }
@@ -99,6 +106,78 @@ static void cleanup_mmput(struct mm_struct **mm)
 	if (!mm || IS_ERR_OR_NULL(*mm))
 		return;
 	mmput(*mm);
+}
+
+static bool hagent_target_managed(struct hagent_target *self, u64 vpfn)
+{
+	return HashMapU64Ptr_contains(&self->map, &vpfn);
+}
+static struct folio *hagent_target_managed_folio(struct hagent_target *self,
+						 u64 vpfn)
+{
+	HashMapU64Ptr_Iter iter = HashMapU64Ptr_find(&self->map, &vpfn);
+	HashMapU64Ptr_Entry *entry = HashMapU64Ptr_Iter_get(&iter);
+	return entry ? entry->val : NULL;
+}
+extern bool folio_isolate_lru(struct folio *folio);
+extern void folio_putback_lru(struct folio *folio);
+DEFINE_CLASS(folio_get, struct folio *, folio_put(_T), ({
+		     folio_get(folio);
+		     folio;
+	     }),
+	     struct folio *folio);
+static int hagent_target_manage(struct hagent_target *self, u64 vpfn,
+				struct folio *folio)
+{
+	// if (hagent_target_managed(self, vpfn))
+	// 	return -EEXIST;
+
+	CLASS(folio_get, __folio)(folio);
+	if (!folio_isolate_lru(folio))
+		return -EAGAIN;
+	/*
+	 * Isolating the folio has taken another reference, so the
+	 * caller's reference can be safely dropped without the folio
+	 * disappearing underneath us during migration.
+	 */
+	// folio_put(folio);
+	list_add_tail(&folio->lru, &self->managed);
+	HashMapU64Ptr_Entry const entry = { vpfn, folio };
+	HashMapU64Ptr_insert(&self->map, &entry);
+	node_stat_mod_folio(folio, NR_ISOLATED_ANON + folio_is_file_lru(folio),
+			    folio_nr_pages(folio));
+	return 0;
+}
+static int hagent_target_unmanage(struct hagent_target *self,
+				  struct folio *folio, u64 vpfn)
+{
+	if (!hagent_target_managed(self, vpfn))
+		return -ENOENT;
+
+	HashMapU64Ptr_erase(&self->map, &vpfn);
+	list_del(&folio->lru);
+	node_stat_mod_folio(folio, NR_ISOLATED_ANON + folio_is_file_lru(folio),
+			    -folio_nr_pages(folio));
+	folio_putback_lru(folio);
+	// folio_add_lru(folio);
+	return 0;
+}
+static int hagent_target_unmanage_all(struct hagent_target *self)
+{
+	struct folio *folio, *next;
+	size_t size = HashMapU64Ptr_size(&self->map);
+	pr_info("%s: size=%zu\n", __func__, size);
+	list_for_each_entry_safe(folio, next, &self->managed, lru) {
+		list_del(&folio->lru);
+		node_stat_mod_folio(folio,
+				    NR_ISOLATED_ANON + folio_is_file_lru(folio),
+				    -folio_nr_pages(folio));
+		folio_putback_lru(folio);
+		// folio_add_lru(folio);
+	}
+	BUG_ON(!list_empty(&folio->lru));
+	HashMapU64Ptr_clear(&self->map);
+	return 0;
 }
 
 noinline static void hagent_target_work_fn_policy(struct work_struct *work)
@@ -130,22 +209,35 @@ noinline static void hagent_target_work_fn_policy(struct work_struct *work)
 				}
 				continue;
 			}
-			if (s.pid != self->task->tgid || !s.addr) {
+			u64 vpfn = s.addr >> PAGE_SHIFT;
+			if (s.pid != self->task->tgid || !vpfn) {
+				count_vm_event(PEBS_NR_DISCARDED);
+				count_vm_event(PEBS_NR_DISCARDED_INCOMPLETE);
 				continue;
 			}
 			total_samples++;
 			struct folio *folio __cleanup(resolve_folio_cleanup) =
 				uvirt_to_folio(mm, s.addr);
-			if (IS_ERR_OR_NULL(folio)) {
+			if (IS_ERR_OR_NULL(folio) || folio_mapping(folio)) {
+				count_vm_event(PEBS_NR_DISCARDED);
+				count_vm_event(PEBS_NR_DISCARDED_FILE);
+				// Ignore file pages for now
 				continue;
 			}
-			if (!folio_test_lru(folio) || folio_mapping(folio)) {
-				// Ignore file pages for now
+			bool managed = hagent_target_managed(self, vpfn);
+			if (!folio_test_lru(folio) && !managed) {
+				count_vm_event(PEBS_NR_DISCARDED);
+				count_vm_event(PEBS_NR_DISCARDED_NONLRU);
+				continue;
+			}
+			if (!managed &&
+			    hagent_target_manage(self, vpfn, folio)) {
+				count_vm_event(PEBS_NR_DISCARDED);
+				count_vm_event(PEBS_NR_DISCARDED_ISOLATE);
 				continue;
 			}
 			bool in_dram = folio_nid(folio) == DRAM_NID;
 			in_dram ? dram_samples++ : pmem_samples++;
-			u64 vpfn = s.addr >> PAGE_SHIFT;
 			u64 count = sds_push(&self->sds, vpfn);
 			struct indexable_heap *heap =
 				&self->heap[in_dram ? DIRECTION_DEMOTION :
@@ -158,7 +250,12 @@ noinline static void hagent_target_work_fn_policy(struct work_struct *work)
 					// 	"%s: updated vpfn=%llu count=%llu\n",
 					// 	__func__, vpfn, count);
 				} else {
-					indexable_heap_erase(heap, vpfn);
+					// DRAM folios without access means they
+					// are cold and are great candidates for
+					// demotion
+					if (!in_dram)
+						indexable_heap_erase(heap,
+								     vpfn);
 				}
 			} else {
 				if (count) {
@@ -180,8 +277,11 @@ noinline static void hagent_target_work_fn_policy(struct work_struct *work)
 	}
 	if (self->total_samples > self->next_migration) {
 		self->next_migration += 10000;
-		pr_info("%s: collected samples dram=%llu pmem=%llu\n", __func__,
-			self->dram_samples, self->pmem_samples);
+		pr_info("%s: collected samples dram=%llu pmem=%llu managed=%zu dheap=%zu pheap=%zu\n",
+			__func__, self->dram_samples, self->pmem_samples,
+			HashMapU64Ptr_size(&self->map),
+			indexable_heap_size(&self->heap[DIRECTION_DEMOTION]),
+			indexable_heap_size(&self->heap[DIRECTION_PROMOTION]));
 		queue_delayed_work(system_wq, &self->works[THREAD_MIGRATION],
 				   1);
 	}
@@ -235,16 +335,20 @@ noinline static void hagent_target_work_fn_migration(struct work_struct *work)
 				// __func__);
 				break;
 			}
-			struct folio *src __cleanup(resolve_folio_cleanup) =
-				uvirt_to_folio(mm, dram_vpfn << PAGE_SHIFT);
+			// struct folio *src __cleanup(resolve_folio_cleanup) =
+			// 	uvirt_to_folio(mm, dram_vpfn << PAGE_SHIFT);
+			struct folio *src =
+				hagent_target_managed_folio(self, dram_vpfn);
 			if (IS_ERR_OR_NULL(src) || folio_nid(src) != DRAM_NID) {
 				// Remove invalid pfn from the heap to avoid
 				// dead loop
 				indexable_heap_pop(dheap);
 				continue;
 			}
-			struct folio *dst __cleanup(resolve_folio_cleanup) =
-				uvirt_to_folio(mm, pmem_vpfn << PAGE_SHIFT);
+			// struct folio *dst __cleanup(resolve_folio_cleanup) =
+			// 	uvirt_to_folio(mm, pmem_vpfn << PAGE_SHIFT);
+			struct folio *dst =
+				hagent_target_managed_folio(self, pmem_vpfn);
 			if (IS_ERR_OR_NULL(dst) || folio_nid(dst) == DRAM_NID) {
 				// Remove invalid pfn from the heap to avoid
 				// dead loop
@@ -259,7 +363,12 @@ noinline static void hagent_target_work_fn_migration(struct work_struct *work)
 			// 	self->task->tgid, self->task,
 			// 	self->task->usage);
 			// pr_info("%s: ===== EXCHANGE EXECUTING ====", __func__);
-			long err = folio_exchange(src, dst, MIGRATE_SYNC);
+			// long err = folio_exchange(src, dst, MIGRATE_SYNC);
+
+			// resolve folio has taken another reference, exceeding
+			// the expected reference count during exchange
+			long err =
+				folio_exchange_isolated(src, dst, MIGRATE_SYNC);
 			if (err) {
 				++failed;
 				// clang-format off
@@ -299,8 +408,7 @@ noinline static void hagent_target_work_fn_migration(struct work_struct *work)
 			if (found_pair >= migration_batch_size) {
 				pr_info_ratelimited(
 					"%s: found pair=%llu failed=%llu\n",
-					__func__,
-					found_pair, failed);
+					__func__, found_pair, failed);
 				break;
 			}
 			// pr_info("%s: next iteration\n", __func__);
@@ -349,6 +457,9 @@ void hagent_target_drop(struct hagent_target *self)
 	for (int i = 0; i < DIRECTION_MAX; ++i)
 		indexable_heap_drop(&self->heap[i]);
 	sds_drop(&self->sds);
+	// We have to destroy as a whole as we do not know the vpfn
+	hagent_target_unmanage_all(self);
+	HashMapU64Ptr_destroy(&self->map);
 	if (self->chan)
 		mpsc_drop(self->chan);
 	if (self->task)
@@ -402,6 +513,10 @@ struct hagent_target *hagent_target_new(pid_t pid)
 	}
 
 	mutex_init(&self->lock);
+
+	INIT_LIST_HEAD(&self->managed);
+	self->map = HashMapU64Ptr_new(32);
+
 	err = sds_init_default(&self->sds);
 	if (err) {
 		hagent_target_drop(self);
@@ -409,8 +524,9 @@ struct hagent_target *hagent_target_new(pid_t pid)
 	}
 
 	for (int i = 0; i < DIRECTION_MAX; ++i) {
-		int err = indexable_heap_init(&self->heap[i],
-					      i == DIRECTION_DEMOTION);
+		int err = indexable_heap_init(
+			&self->heap[i], i == DIRECTION_DEMOTION,
+			i == DIRECTION_DEMOTION ? "dram" : "pmem");
 		if (err) {
 			hagent_target_drop(self);
 			return ERR_PTR(err);
