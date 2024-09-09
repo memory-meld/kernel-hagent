@@ -818,6 +818,7 @@ void folio_putback_lru(struct folio *folio)
 	folio_add_lru(folio);
 	folio_put(folio);		/* drop ref from isolate */
 }
+EXPORT_SYMBOL(folio_putback_lru);
 
 enum folio_references {
 	FOLIOREF_RECLAIM,
@@ -1761,6 +1762,7 @@ bool folio_isolate_lru(struct folio *folio)
 
 	return ret;
 }
+EXPORT_SYMBOL(folio_isolate_lru);
 
 /*
  * A direct reclaimer may isolate SWAP_CLUSTER_MAX pages from the LRU list and

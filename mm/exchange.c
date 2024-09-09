@@ -611,7 +611,9 @@ bool folio_exchange_supported(struct folio *folio, enum migrate_mode mode)
 		// /* free_pages_prepare() will clear PG_isolated. */
 		// list_del(&folio->lru);
 		// // migrate_folio_done(folio, MR_NUMA_MISPLACED);
-		pr_warn("%s: folio=%p ref_count=1\n", __func__, folio);
+		pr_info("%s: folio=%p freed from under us ref_count=%d mapcount=%d",
+			__func__, folio, folio_ref_count(folio),
+			folio_mapcount(folio));
 		return false;
 	}
 	if (folio_test_writeback(folio)) {
@@ -792,6 +794,58 @@ out_old:
 	folio_exchange_fs_finish(old, mode, old_buffer_locked);
 	return rc;
 }
+
+int folio_exchange_parallel_isolated(struct folio *old, struct folio *new,
+				     enum migrate_mode mode,
+				     enum parallel_mode par)
+{
+	CLASS(folio_exchange_lock, old_locked)(old, mode);
+	if (IS_ERR(old_locked)) {
+		count_vm_event(FOLIO_EXCHANGE_FAILED_LOCK);
+		return PTR_ERR(old_locked);
+	}
+	CLASS(folio_exchange_lock, new_locked)(new, mode);
+	if (IS_ERR(new_locked)) {
+		count_vm_event(FOLIO_EXCHANGE_FAILED_LOCK);
+		return PTR_ERR(old_locked);
+	}
+	if (!folio_exchange_supported(old, mode)) {
+		count_vm_event(FOLIO_EXCHANGE_FAILED_SUPPORT);
+		return PTR_ERR(old_locked);
+	}
+
+	if (!folio_exchange_supported(new, mode)) {
+		count_vm_event(FOLIO_EXCHANGE_FAILED_SUPPORT);
+		return PTR_ERR(old_locked);
+	}
+
+	CLASS(folio_exchange_unmap, old_unmapped)(old, mode);
+	CLASS(folio_exchange_unmap, new_unmapped)(new, mode);
+
+	// TODO: improve TLB flushing via batching
+	try_to_unmap_flush();
+
+	int err = folio_exchange_move(old, new, mode, par);
+	if (err) {
+		count_vm_event(FOLIO_EXCHANGE_FAILED_MOVE);
+	}
+	old_unmapped.dst = new;
+	new_unmapped.dst = old;
+
+	return err;
+}
+EXPORT_SYMBOL(folio_exchange_parallel_isolated);
+
+int folio_exchange_isolated(struct folio *old, struct folio *new,
+			    enum migrate_mode mode)
+{
+	count_vm_event(FOLIO_EXCHANGE);
+	int err = folio_exchange_parallel_isolated(old, new, mode,
+						   PARALLEL_SINGLE);
+	count_vm_event(err ? FOLIO_EXCHANGE_FAILED : FOLIO_EXCHANGE_SUCCESS);
+	return err;
+}
+EXPORT_SYMBOL(folio_exchange_isolated);
 
 int folio_exchange_parallel(struct folio *old, struct folio *new,
 			    enum migrate_mode mode, enum parallel_mode par)
