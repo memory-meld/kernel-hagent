@@ -26,6 +26,12 @@ module_param_named(retired_stores_sample_period, retired_stores_sample_period,
 MODULE_PARM_DESC(retired_stores_sample_period,
 		 "Sample period for retired stores event, defaults to 17");
 
+ulong local_dram_miss_sample_period = SAMPLE_PERIOD;
+module_param_named(local_dram_miss_sample_period, local_dram_miss_sample_period,
+		   ulong, 0644);
+MODULE_PARM_DESC(local_dram_miss_sample_period,
+		 "Sample period for local DRAM L3 miss event, defaults to 17");
+
 ulong streaming_decaying_sketch_width = SDS_WIDTH;
 module_param_named(streaming_decaying_sketch_width,
 		   streaming_decaying_sketch_width, ulong, 0644);
@@ -107,41 +113,59 @@ static void intel_pmu_print_debug_all(void)
 enum event_config {
 	MEM_TRANS_RETIRED_LOAD_LATENCY = 0x01cd,
 	MEM_INST_RETIRED_ALL_STORES = 0x82d0,
+	MEM_LOAD_L3_MISS_RETIRED_LOCAL_DRAM = 0x01d3,
 };
 struct perf_event_attr event_attrs[EVENT_MAX] = {
-	[EVENT_LOAD] = {
-		.type = PERF_TYPE_RAW,
-		.config = MEM_TRANS_RETIRED_LOAD_LATENCY,
-		.config1 = LOAD_LATENCY_THRESHOLD,
-		.sample_type = PERF_SAMPLE_TID | PERF_SAMPLE_TIME | PERF_SAMPLE_ADDR |
-			       PERF_SAMPLE_WEIGHT | PERF_SAMPLE_PHYS_ADDR,
-		.sample_period = SAMPLE_PERIOD,
-		.precise_ip = 3,
-		.inherit = 1,
-		// .disabled = 1,
-		.exclude_kernel = 1,
-		.exclude_hv = 1,
-		.exclude_callchain_kernel= 1,
-	},
+	// [EVENT_LOAD] = {
+	// 	.type = PERF_TYPE_RAW,
+	// 	.config = MEM_TRANS_RETIRED_LOAD_LATENCY,
+	// 	.config1 = LOAD_LATENCY_THRESHOLD,
+	// 	.sample_type = PERF_SAMPLE_TID | PERF_SAMPLE_TIME | PERF_SAMPLE_ADDR |
+	// 		       PERF_SAMPLE_WEIGHT | PERF_SAMPLE_PHYS_ADDR,
+	// 	.sample_period = SAMPLE_PERIOD,
+	// 	.precise_ip = 3,
+	// 	.inherit = 1,
+	// 	// .disabled = 1,
+	// 	.exclude_kernel = 1,
+	// 	.exclude_hv = 1,
+	// 	.exclude_callchain_kernel = 1,
+	// },
 	[EVENT_STORE] = {
 		.type = PERF_TYPE_RAW,
 		.config = MEM_INST_RETIRED_ALL_STORES,
 		.sample_type = PERF_SAMPLE_TID | PERF_SAMPLE_TIME | PERF_SAMPLE_ADDR |
 			       PERF_SAMPLE_WEIGHT | PERF_SAMPLE_PHYS_ADDR,
+		.sample_period = SAMPLE_PERIOD * 2,
+		.inherit = 1,
+		.precise_ip = 3,
+		// .disabled = 1,
+		.exclude_kernel = 1,
+		.exclude_hv = 1,
+		.exclude_callchain_kernel = 1,
+	},
+	[EVENT_DRAM] = {
+		.type = PERF_TYPE_RAW,
+		.config = MEM_LOAD_L3_MISS_RETIRED_LOCAL_DRAM,
+		.sample_type = PERF_SAMPLE_TID | PERF_SAMPLE_TIME | PERF_SAMPLE_ADDR |
+			       PERF_SAMPLE_WEIGHT | PERF_SAMPLE_PHYS_ADDR,
 		.sample_period = SAMPLE_PERIOD,
 		.inherit = 1,
 		.precise_ip = 3,
 		// .disabled = 1,
 		.exclude_kernel = 1,
 		.exclude_hv = 1,
-		.exclude_callchain_kernel= 1,
+		.exclude_callchain_kernel = 1,
 	},
 };
 static inline void event_attrs_update_param(void)
 {
-	event_attrs[EVENT_LOAD].config1 = load_latency_threshold;
-	event_attrs[EVENT_LOAD].sample_period = load_latency_sample_period;
+	// event_attrs[EVENT_LOAD].config1 = load_latency_threshold;
+	// event_attrs[EVENT_LOAD].sample_period = load_latency_sample_period;
 	event_attrs[EVENT_STORE].sample_period = retired_stores_sample_period;
+	event_attrs[EVENT_DRAM].sample_period = local_dram_miss_sample_period;
+	pr_info("%s: local_dram_miss_sample_period=%lu retired_stores_sample_period=%lu\n",
+		__func__, local_dram_miss_sample_period,
+		retired_stores_sample_period);
 }
 
 static inline void sds_update_param(void)

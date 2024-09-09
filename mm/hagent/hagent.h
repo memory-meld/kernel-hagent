@@ -27,8 +27,9 @@ enum {
 };
 
 enum {
-	EVENT_LOAD,
+	// EVENT_LOAD,
 	EVENT_STORE,
+	EVENT_DRAM,
 	EVENT_MAX,
 };
 extern struct perf_event_attr event_attrs[EVENT_MAX];
