@@ -490,6 +490,27 @@ struct hagent_target *hagent_target_new(pid_t pid)
 	}
 	self->chan = chan;
 
+	mutex_init(&self->lock);
+
+	INIT_LIST_HEAD(&self->managed);
+	self->map = HashMapU64Ptr_new(32);
+
+	int err = sds_init_default(&self->sds);
+	if (err) {
+		hagent_target_drop(self);
+		return ERR_PTR(err);
+	}
+
+	for (int i = 0; i < DIRECTION_MAX; ++i) {
+		int err = indexable_heap_init(
+			&self->heap[i], i == DIRECTION_DEMOTION,
+			i == DIRECTION_DEMOTION ? "dram" : "pmem");
+		if (err) {
+			hagent_target_drop(self);
+			return ERR_PTR(err);
+		}
+	}
+
 	if (asynchronous_architecture) {
 		static_branch_enable(&use_asynchronous_architecture);
 		pr_info("%s: use asynchronous architecture\n", __func__);
@@ -506,31 +527,10 @@ struct hagent_target *hagent_target_new(pid_t pid)
 		BUG();
 	}
 
-	int err = hagnet_target_events_create(self, task);
+	err = hagnet_target_events_create(self, task);
 	if (err) {
 		hagent_target_drop(self);
 		return ERR_PTR(err);
-	}
-
-	mutex_init(&self->lock);
-
-	INIT_LIST_HEAD(&self->managed);
-	self->map = HashMapU64Ptr_new(32);
-
-	err = sds_init_default(&self->sds);
-	if (err) {
-		hagent_target_drop(self);
-		return ERR_PTR(err);
-	}
-
-	for (int i = 0; i < DIRECTION_MAX; ++i) {
-		int err = indexable_heap_init(
-			&self->heap[i], i == DIRECTION_DEMOTION,
-			i == DIRECTION_DEMOTION ? "dram" : "pmem");
-		if (err) {
-			hagent_target_drop(self);
-			return ERR_PTR(err);
-		}
 	}
 
 	pr_info("%s: pid=%d", __func__, pid);
