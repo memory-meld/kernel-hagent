@@ -314,7 +314,7 @@ static inline void indexable_heap_dump(struct indexable_heap *self, size_t n)
 
 static inline void indexable_heap_drop(struct indexable_heap *self)
 {
-	indexable_heap_dump(self, indexable_heap_size(self));
+	indexable_heap_dump(self, min(indexable_heap_size(self), 10000));
 	HashMapU64U64_destroy(&self->indices);
 	vector_drop(&self->values);
 }

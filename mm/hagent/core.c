@@ -63,6 +63,10 @@ static void hagnet_target_events_release(struct hagent_target *self)
 {
 	for (int i = 0; i < EVENT_MAX; ++i) {
 		if (self->events[i])
+			perf_event_disable(self->events[i]);
+	}
+	for (int i = 0; i < EVENT_MAX; ++i) {
+		if (self->events[i])
 			perf_event_release_kernel(self->events[i]);
 	}
 }
@@ -422,6 +426,17 @@ noinline static void hagent_target_work_fn_migration(struct work_struct *work)
 	}
 	// pr_info("%s: returned\n", __func__);
 }
+
+static void hagent_target_work_drop(struct hagent_target *self);
+static void hagent_target_work_fn_stop(struct work_struct *work)
+{
+	struct hagent_target *self =
+		container_of(work, typeof(*self), stop.work);
+	hagnet_target_events_release(self);
+	hagent_target_work_drop(self);
+	complete(&self->stopped);
+}
+
 static void (*hagent_target_work_fn[THREAD_MAX])(struct work_struct *) = {
 	[THREAD_POLICY] = hagent_target_work_fn_policy,
 	[THREAD_MIGRATION] = hagent_target_work_fn_migration,
@@ -441,6 +456,8 @@ static void hagent_target_work_drop(struct hagent_target *self)
 }
 static int hagent_target_work_init(struct hagent_target *self)
 {
+	INIT_DELAYED_WORK(&self->stop, hagent_target_work_fn_stop);
+	init_completion(&self->stopped);
 	for (int i = 0; i < THREAD_MAX; ++i) {
 		INIT_DELAYED_WORK(&self->works[i], hagent_target_work_fn[i]);
 		pr_info("%s: INIT_DELAYED_WORK(%s)\n", __func__,
@@ -452,8 +469,8 @@ static int hagent_target_work_init(struct hagent_target *self)
 void hagent_target_drop(struct hagent_target *self)
 {
 	pr_info("%s: pid=%d", __func__, self->task->pid);
-	hagnet_target_events_release(self);
-	hagent_target_work_drop(self);
+	queue_delayed_work(system_freezable_wq, &self->stop, 0);
+	wait_for_completion(&self->stopped);
 	for (int i = 0; i < DIRECTION_MAX; ++i)
 		indexable_heap_drop(&self->heap[i]);
 	sds_drop(&self->sds);

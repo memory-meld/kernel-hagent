@@ -50,6 +50,8 @@ struct hagent_target {
 		struct task_struct *threads[THREAD_MAX];
 		struct delayed_work works[THREAD_MAX];
 	};
+	struct delayed_work stop;
+	struct completion stopped;
 	struct perf_event *events[EVENT_MAX];
 	struct mutex lock;
 	// All managed struct folio *
