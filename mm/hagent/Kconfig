@@ -5,6 +5,10 @@ config HAGENT
         help
           Enable heterogeneous memory guest agent to rebalance memory across different memory media.
 
+config HAGENT_TEST
+	tristate "Hetagent test" if !KUNIT_ALL_TESTS
+	default KUNIT_ALL_TESTS
+
 config EXCHANGE
 	bool "Page exchange"
 	default y
