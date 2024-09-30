@@ -140,6 +140,14 @@ static inline u64 const *kv_cvalue(struct kv const *kv)	{ return &kv->v; }
 // 	}
 // };
 
+CWISS_DECLARE_FLAT_HASHMAP(HashMapU64Ptr, u64, void *);
+static void *HashMapU64Ptr_get(HashMapU64Ptr *self, u64 const *key)
+{
+	HashMapU64Ptr_Iter i = HashMapU64Ptr_find(self, key);
+	HashMapU64Ptr_Entry *e = HashMapU64Ptr_Iter_get(&i);
+	return e ? e->val : NULL;
+}
+
 // HashMapU64U64: A hash map from u64 to u64
 CWISS_DECLARE_FLAT_HASHMAP(HashMapU64U64, u64, u64);
 noinline static inline HashMapU64U64_Entry *
