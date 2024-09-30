@@ -968,6 +968,67 @@ int ring_buffer_wait(struct trace_buffer *buffer, int cpu, int full,
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(ring_buffer_wait);
+
+#define select_event(wqh0, cond0, wqh1, cond1)                   \
+	({                                                       \
+		__label__ out;                                   \
+		long __ret = -EAGAIN;                            \
+		might_sleep();                                   \
+		if (cond0) {                                     \
+			__ret = 0;                               \
+			goto out;                                \
+		}                                                \
+		if (cond1) {                                     \
+			__ret = 1;                               \
+			goto out;                                \
+		}                                                \
+		DEFINE_WAIT_FUNC(__wqe0, default_wake_function); \
+		DEFINE_WAIT_FUNC(__wqe1, default_wake_function); \
+		add_wait_queue(wqh0, &__wqe0);                   \
+		add_wait_queue(wqh1, &__wqe1);                   \
+		for (;;) {                                       \
+			set_current_state(TASK_INTERRUPTIBLE);   \
+			if (cond0) {                             \
+				__ret = 0;                       \
+				break;                           \
+			}                                        \
+			if (cond1) {                             \
+				__ret = 1;                       \
+				break;                           \
+			}                                        \
+			schedule();                              \
+			if (signal_pending(current)) {           \
+				__ret = -ERESTARTSYS;            \
+				break;                           \
+			}                                        \
+		}                                                \
+		remove_wait_queue(wqh1, &__wqe1);                \
+		remove_wait_queue(wqh0, &__wqe0);                \
+		__set_current_state(TASK_RUNNING);               \
+out:                                                             \
+		__ret;                                           \
+	})
+
+int ring_buffer_wait_select(struct trace_buffer *buffer0,
+			    ring_buffer_cond_fn cond0, void *data0,
+			    struct trace_buffer *buffer1,
+			    ring_buffer_cond_fn cond1, void *data1)
+{
+	struct rb_irq_work *rbwork0 = &buffer0->irq_work,
+			   *rbwork1 = &buffer1->irq_work;
+	struct wait_queue_head *waitq0 = &rbwork0->waiters,
+			       *waitq1 = &rbwork1->waiters;
+	BUG_ON(!cond0 || !cond1);
+	return select_event(waitq0,
+			    rb_wait_cond(rbwork0, buffer0, RING_BUFFER_ALL_CPUS,
+					 0, cond0, data0),
+			    waitq1,
+			    rb_wait_cond(rbwork1, buffer1, RING_BUFFER_ALL_CPUS,
+					 0, cond1, data1));
+};
+EXPORT_SYMBOL_GPL(ring_buffer_wait_select);
+#undef select_event
 
 /**
  * ring_buffer_poll_wait - poll on buffer input
