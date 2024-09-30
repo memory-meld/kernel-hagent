@@ -429,6 +429,14 @@ noinline static inline bool indexable_heap_contains(struct indexable_heap *self,
 	return HashMapU64U64_Iter_get(&it) != NULL;
 }
 
+noinline static inline u64 const *
+indexable_heap_get(struct indexable_heap *self, u64 key)
+{
+	HashMapU64U64_Iter it = HashMapU64U64_find(&self->indices, &key);
+	HashMapU64U64_Entry *e = HashMapU64U64_Iter_get(&it);
+	return e ? kv_cvalue(vector_at(&self->values, e->val)) : NULL;
+}
+
 // void indexable_heap_make(struct indexable_heap *heap);
 // void indexable_heap_push(struct indexable_heap *heap, u64 key, u64 value);
 // void indexable_heap_pop(struct indexable_heap *heap);
