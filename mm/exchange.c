@@ -1115,3 +1115,56 @@ int folio_bimigrate(struct folio *old, struct folio *new,
 	return err;
 }
 EXPORT_SYMBOL(folio_bimigrate);
+
+// Count how many folios in the given virtual address range are on the given node.
+int kernel_count_node_folios(struct mm_struct *mm, int nid, u64 va_start,
+			     u64 va_end, u64 *count, u64 *total)
+{
+	*count = 0, *total = 0;
+	guard(mmap_read_lock)(mm);
+	struct vm_area_struct *vma;
+	for (u64 cur = va_start; cur < va_end;) {
+		vma = vma_lookup(mm, cur);
+		if (!vma) {
+			cur += PAGE_SIZE;
+			continue;
+		}
+		struct folio *folio, *last = NULL;
+		for (; cur < vma->vm_end && cur < va_end; cur += PAGE_SIZE) {
+			struct page *page =
+				follow_page(vma, cur, FOLL_GET | FOLL_DUMP);
+			if (IS_ERR_OR_NULL(page))
+				continue;
+			folio = page_folio(page);
+			if (folio != last) {
+				last = folio;
+				if (folio_nid(folio) == nid)
+					(*count)++;
+				(*total)++;
+			}
+			put_page(page);
+		}
+	}
+	return 0;
+}
+EXPORT_SYMBOL(kernel_count_node_folios);
+
+SYSCALL_DEFINE6(count_node_folios, pid_t, pid, int, nid, u64, va_start, u64,
+		va_end, u64 __user *, ucount, u64 __user *, utotal)
+{
+	pr_info("%s: pid=%d nid=%d va_start=%llu va_end=%llu", __func__, pid,
+		nid, va_start, va_end);
+	nodemask_t task_nodes;
+	struct mm_struct *mm = find_mm_struct(pid, &task_nodes);
+	if (IS_ERR_OR_NULL(mm))
+		return PTR_ERR(mm);
+	u64 count = 0, total = 0;
+	int ret = kernel_count_node_folios(mm, nid, va_start, va_end, &count,
+					   &total);
+	mmput(mm);
+	if (copy_to_user(ucount, &count, sizeof(count)))
+		return -EINVAL;
+	if (copy_to_user(utotal, &total, sizeof(total)))
+		return -EINVAL;
+	return ret;
+}
