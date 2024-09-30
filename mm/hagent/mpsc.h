@@ -47,5 +47,23 @@ static inline void mpsc_drop(mpsc_t chan)
 {
 	ring_buffer_free(chan);
 }
+static inline bool mpsc_wait_always(void *p)
+{
+	return false;
+}
+static inline int mpsc_wait(mpsc_t chan)
+{
+	return ring_buffer_wait(chan, RING_BUFFER_ALL_CPUS, 0, mpsc_wait_always,
+				NULL);
+}
+extern int ring_buffer_wait_select(struct trace_buffer *buffer0,
+				   ring_buffer_cond_fn cond0, void *data0,
+				   struct trace_buffer *buffer1,
+				   ring_buffer_cond_fn cond1, void *data1);
+static inline int mpsc_select(mpsc_t ch0, mpsc_t ch1)
+{
+	return ring_buffer_wait_select(ch0, mpsc_wait_always, NULL, ch1,
+				       mpsc_wait_always, NULL);
+}
 
 #endif // !HAGENT_MPSC_H
