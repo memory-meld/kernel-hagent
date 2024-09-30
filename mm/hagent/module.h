@@ -9,7 +9,6 @@
 #define FMEM_NODE (NODE_DATA(FMEM_NID))
 #define SMEM_NODE (NODE_DATA(SMEM_NID))
 
-
 enum module_param_defaults {
 	SAMPLE_PERIOD = 4023,
 	LOAD_LATENCY_THRESHOLD = 64,

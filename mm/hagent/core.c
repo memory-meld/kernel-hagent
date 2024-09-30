@@ -11,8 +11,9 @@
 #include <linux/mm_inline.h>
 #include <../internal.h>
 
-#include "module.h"
+#include "hagent.h"
 #include "pebs.h"
+#include "module.h"
 #include "mpsc.h"
 #include "sds.h"
 #include "indexable_heap.h"
@@ -215,38 +216,6 @@ noinline static int target_worker_main(struct target *self)
 	return 0;
 }
 
-// struct timer_data {
-// 	wait_queue_head_t wqh;
-// 	struct hrtimer timer;
-// 	atomic_long_t tick;
-// 	atomic_t expired;
-// };
-// noinline static enum hrtimer_restart timer_fn(struct hrtimer *timer)
-// {
-// 	struct timer_data *self = container_of(timer, struct timer_data, timer);
-// 	atomic_set(&self->expired, 1);
-// 	atomic_long_inc(&self->tick);
-// 	wake_up(&self->wqh);
-// 	return HRTIMER_RESTART;
-// }
-// noinline static void timer_init(struct timer_data *self, ktime_t expiry_ns)
-// {
-// 	memset(self, 0, sizeof(*self));
-// 	init_waitqueue_head(&self->wqh);
-// 	hrtimer_init(&self->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-// 	self->timer.function = timer_fn;
-// 	if (expiry_ns)
-// 		hrtimer_start(&self->timer, expiry_ns, HRTIMER_MODE_REL);
-// }
-// noinline static void timer_start(struct timer_data *self, ktime_t expiry_ns)
-// {
-// 	hrtimer_start(&self->timer, expiry_ns, HRTIMER_MODE_REL);
-// }
-// noinline static void timer_drop(struct timer_data *self)
-// {
-// 	hrtimer_cancel(&self->timer);
-// }
-
 noinline static int target_worker_throttle(struct target *self)
 {
 	u64 period = msecs_to_jiffies(throttle_pulse_period_ms);
@@ -347,9 +316,8 @@ noinline static int policy_handle_sample_one(struct policy_worker *data,
 		return -EFAULT;
 	if (folio_ref_count(folio) < 2)
 		return -ESTALE;
+	// See uvirt_to_folio()
 	BUG_ON(folio_mapping(folio));
-	// if (folio_mapping(folio))
-	// 	return -EOPNOTSUPP;
 	// Check if the page is in the managed set or under migration
 	if (HashMapU64Ptr_contains(mset, &vpfn)) {
 	} else if (folio_test_lru(folio)) {
@@ -384,20 +352,6 @@ noinline static int policy_handle_sample_one(struct policy_worker *data,
 		if (count)
 			indexable_heap_push(heap, vpfn, count);
 	}
-
-	// HashMapU64U64_Iter iter = HashMapU64U64_find(tset, &vpfn);
-	// HashMapU64U64_Entry *e = HashMapU64U64_Iter_get(&iter);
-	// if (e) {
-	// 	// The folio is under migration record the frequency in the tset
-	// 	e->val += 1;
-	// } else if (indexable_heap_contains(heap, vpfn)) {
-	// 	// Update existing folio
-	// 	indexable_heap_inc(heap, vpfn, target_event_weight(s));
-	// } else {
-	// 	// Potential a decayed folio getting accessed again or just
-	// 	// plainly a new folio
-	// 	indexable_heap_push(heap, vpfn, target_event_weight(s));
-	// }
 
 	count_vm_event(in_fmem ? PEBS_NR_SAMPLED_FMEM : PEBS_NR_SAMPLED_SMEM);
 	return 0;
