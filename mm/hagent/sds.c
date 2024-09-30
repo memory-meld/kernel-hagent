@@ -1,16 +1,46 @@
 #include <linux/xxhash.h>
+#include <linux/limits.h>
 
 #include "sds.h"
 #include "mt19937.h"
 
-// return a - b when a >= b, return 0 when b > a
-#define saturating_sub(a, b)            \
-	({                              \
-		typeof(a) __aa = (a);   \
-		typeof(b) __bb = (b);   \
-		__aa - min(__aa, __bb); \
+#define TYPE_MIN(x)                \
+	(typeof((x)))_Generic((x), \
+		u64: 0,            \
+		u32: 0,            \
+		u16: 0,            \
+		u8: 0,             \
+		s64: S64_MIN,      \
+		s32: S32_MIN,      \
+		s16: S16_MIN,      \
+		s8: S8_MIN)
+
+#define TYPE_MAX(x)                \
+	(typeof((x)))_Generic((x), \
+		u64: U64_MAX,      \
+		u32: U32_MAX,      \
+		u16: U16_MAX,      \
+		u8: U8_MAX,        \
+		s64: S64_MAX,      \
+		s32: S32_MAX,      \
+		s16: S16_MAX,      \
+		s8: S8_MAX)
+
+#define saturating_add(a, b)                                  \
+	({                                                    \
+		typeof((a)) __tmp;                            \
+		if (__builtin_add_overflow((a), (b), &__tmp)) \
+			__tmp = TYPE_MAX(__tmp);              \
+		__tmp;                                        \
 	})
 
+#define saturating_sub(a, b)                                  \
+	({                                                    \
+		typeof((a)) __tmp;                            \
+		if (__builtin_sub_overflow((a), (b), &__tmp)) \
+			__tmp = TYPE_MIN(__tmp);              \
+		__tmp;                                        \
+	})
 
 // clang-format off
 static u64 sds_powb(u64 exp) {
@@ -71,39 +101,45 @@ u16 sds_get(struct sds *s, u64 key)
 	struct sds_slot *slot;
 	sds_for_each_slot(s, key, hash, slot)
 	{
-		if (slot->fingerprint != (u16)hash)
+		if (slot->fingerprint != (sds_fp_t)hash)
 			continue;
 		count = max(slot->count, count);
 	}
 	return count;
 }
 
-u16 sds_push(struct sds *s, u64 key)
+u16 sds_push_multiple(struct sds *s, u64 key, u16 delta)
 {
 	// pr_info_ratelimited("%s: key=0x%llx\n", __func__, key);
-	u16 count = 0;
+	sds_cnt_t count = 0;
 	u64 hash;
 	struct sds_slot *slot;
 	sds_for_each_slot(s, key, hash, slot)
 	{
-		u16 fingerprint = hash;
-		u16 *f = &slot->fingerprint, *c = &slot->count;
+		sds_fp_t fingerprint = hash, *f = &slot->fingerprint;
+		sds_cnt_t *c = &slot->count, one = 1, zero = 0;
 		if (*f == fingerprint) {
-			*c = min((u16)(*c + 1), (u16)SHRT_MAX);
+			*c = saturating_add(*c, delta);
 		} else {
 			// empty slot or decay with probability
-			if (0 == mt19937() % sds_powb(*c)) {
+			if (static_branch_likely(&should_decay_sketch) &&
+			    0 == mt19937() % sds_powb(*c)) {
 				// pr_info_ratelimited(
 				// 	"%s: decaying key=0x%llx i=%llu fingerprint=0x%x count=%u\n",
 				// 	__func__, key, i, *f, *c);
-				*c = saturating_sub(*c, (u16)1);
-				if (*c == 0) {
+				*c = saturating_sub(*c, one);
+				if (*c == zero) {
 					*f = fingerprint;
-					*c = 1;
+					*c = one;
 				}
 			}
 		}
 		count = max(*c, count);
 	}
 	return count;
+}
+
+u16 sds_push(struct sds *s, u64 key)
+{
+	return sds_push_multiple(s, key, 1);
 }

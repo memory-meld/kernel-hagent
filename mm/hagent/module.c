@@ -69,6 +69,10 @@ module_param_named(asynchronous_architecture, asynchronous_architecture, bool,
 MODULE_PARM_DESC(asynchronous_architecture,
 		 "Whether to use asynchronous architecture, defaults to true");
 
+bool decay_sketch = DECAY_SKETCH;
+module_param_named(decay_sketch, decay_sketch, bool, 0644);
+MODULE_PARM_DESC(decay_sketch, "Whether to decay sketch, defaults to true");
+
 bool debug_log_samples = false;
 module_param_named(debug_log_samples, debug_log_samples, bool, 0644);
 MODULE_PARM_DESC(debug_log_samples,
@@ -81,6 +85,7 @@ MODULE_PARM_DESC(debug_migration_latency,
 		 "Log migration latency (only for debugging)");
 
 DEFINE_STATIC_KEY_TRUE(use_asynchronous_architecture);
+DEFINE_STATIC_KEY_TRUE(should_decay_sketch);
 
 static void intel_pmu_print_debug_all(void)
 {

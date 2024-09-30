@@ -21,6 +21,7 @@ enum module_param_defaults {
 	MIGRATION_TARGET_DRAM_ACCESS_PERCENTILE = 95,
 	MIGRATION_BATCH_SIZE = 4096,
 	ASYNCHRONOUS_ARCHITECTURE = true,
+	DECAY_SKETCH = true,
 	ANONPAGES_SIGNIFICANCE = (1ul << 30) / PAGE_SIZE,
 };
 extern ulong ring_buffer_pages;
