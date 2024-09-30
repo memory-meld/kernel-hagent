@@ -611,7 +611,8 @@ bool folio_exchange_supported(struct folio *folio, enum migrate_mode mode)
 		// /* free_pages_prepare() will clear PG_isolated. */
 		// list_del(&folio->lru);
 		// // migrate_folio_done(folio, MR_NUMA_MISPLACED);
-		pr_info("%s: folio=%p freed from under us ref_count=%d mapcount=%d",
+		pr_warn_ratelimited(
+			"%s: folio=%p freed from under us ref_count=%d mapcount=%d",
 			__func__, folio, folio_ref_count(folio),
 			folio_mapcount(folio));
 		return false;
@@ -624,10 +625,11 @@ bool folio_exchange_supported(struct folio *folio, enum migrate_mode mode)
 		default:
 			return false;
 		}
-		pr_info("%s: folio=%p waiting for writeback", __func__, folio);
+		pr_warn_ratelimited("%s: folio=%p waiting for writeback",
+				    __func__, folio);
 		folio_wait_writeback(folio);
-		pr_info("%s: folio=%p waiting for writeback done", __func__,
-			folio);
+		pr_warn_ratelimited("%s: folio=%p waiting for writeback done",
+				    __func__, folio);
 	}
 	/*
 	 * Corner case handling:
@@ -640,11 +642,12 @@ bool folio_exchange_supported(struct folio *folio, enum migrate_mode mode)
 	 */
 	if (!folio->mapping && folio_test_private(folio)) {
 		try_to_free_buffers(folio);
-		pr_info("%s: folio=%p orphaned page", __func__, folio);
+		pr_warn_ratelimited("%s: folio=%p orphaned page", __func__,
+				    folio);
 		return false;
 	}
 	if (folio_test_mlocked(folio)) {
-		pr_info("%s: folio=%p mlocked", __func__, folio);
+		pr_warn_ratelimited("%s: folio=%p mlocked", __func__, folio);
 		return false;
 	}
 
@@ -655,7 +658,8 @@ bool folio_exchange_supported(struct folio *folio, enum migrate_mode mode)
 	int ref_count = folio_ref_count(folio);
 	int mapcount = folio_mapcount(folio);
 	if (expected_refs + mapcount != ref_count) {
-		pr_info("%s: folio=%p wrong reference count ref_count=%d expected=%d mapcount=%d",
+		pr_warn_ratelimited(
+			"%s: folio=%p wrong reference count ref_count=%d expected=%d mapcount=%d",
 			__func__, folio, ref_count, expected_refs, mapcount);
 		return false;
 	}
@@ -683,7 +687,8 @@ struct folio_isolated folio_exchange_isolate(struct folio *folio,
 {
 	struct folio_isolated r = {};
 	if (!folio_isolate_lru(folio)) {
-		pr_err("%s: folio=%p failed to isolate", __func__, folio);
+		pr_err_ratelimited("%s: folio=%p failed to isolate", __func__,
+				   folio);
 		return r;
 	}
 	r.folio = folio;
@@ -811,12 +816,12 @@ int folio_exchange_parallel_isolated(struct folio *old, struct folio *new,
 	}
 	if (!folio_exchange_supported(old, mode)) {
 		count_vm_event(FOLIO_EXCHANGE_FAILED_SUPPORT);
-		return PTR_ERR(old_locked);
+		return -ENOTSUPP;
 	}
 
 	if (!folio_exchange_supported(new, mode)) {
 		count_vm_event(FOLIO_EXCHANGE_FAILED_SUPPORT);
-		return PTR_ERR(old_locked);
+		return -ENOTSUPP + 1;
 	}
 
 	CLASS(folio_exchange_unmap, old_unmapped)(old, mode);
