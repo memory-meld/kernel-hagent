@@ -16,7 +16,7 @@ DEFINE_MUTEX(hagent_sysfs_lock);
 
 struct hagent_sysfs_target {
 	struct kobject kobj;
-	struct hagent_target *target;
+	struct target *target;
 };
 
 static struct hagent_sysfs_target *hagent_sysfs_target_alloc(void)
@@ -26,7 +26,7 @@ static struct hagent_sysfs_target *hagent_sysfs_target_alloc(void)
 }
 static inline bool hagent_sysfs_target_running(struct hagent_sysfs_target *t)
 {
-	return t->target && hagent_target_pid(t->target);
+	return t->target && target_pid(t->target);
 }
 static int hagent_sysfs_target_add_dirs(struct hagent_sysfs_target *t)
 {
@@ -41,7 +41,7 @@ static void hagent_sysfs_target_release(struct kobject *kobj)
 	struct hagent_sysfs_target *t =
 		container_of(kobj, struct hagent_sysfs_target, kobj);
 	if (t->target) {
-		hagent_target_drop(t->target);
+		target_drop(t->target);
 	}
 	kfree(t);
 }
@@ -53,7 +53,7 @@ static ssize_t pid_show(struct kobject *kobj, struct kobj_attribute *attr,
 	if (!t->target) {
 		return sysfs_emit(buf, "%d\n", -1);
 	}
-	return sysfs_emit(buf, "%d\n", hagent_target_pid(t->target));
+	return sysfs_emit(buf, "%d\n", target_pid(t->target));
 }
 static ssize_t pid_store(struct kobject *kobj, struct kobj_attribute *attr,
 			 const char *buf, size_t count)
@@ -68,13 +68,13 @@ static ssize_t pid_store(struct kobject *kobj, struct kobj_attribute *attr,
 		return -EBUSY;
 	}
 	if (t->target) {
-		hagent_target_drop(t->target);
+		target_drop(t->target);
 	}
 	if (pid == -1) {
 		mutex_unlock(&hagent_sysfs_lock);
 		return count;
 	}
-	struct hagent_target *target = hagent_target_new(pid);
+	struct target *target = target_new(pid);
 	if (IS_ERR(target)) {
 		mutex_unlock(&hagent_sysfs_lock);
 		return PTR_ERR(target);
@@ -217,7 +217,6 @@ static const struct kobj_type hagent_sysfs_targets_ktype = {
 
 static struct kobject *hagent_sysfs_root;
 static struct hagent_sysfs_targets *hagent_sysfs_targets;
-// void __exit hagent_sysfs_exit(void)
 int __init hagent_sysfs_init(void)
 {
 	hagent_sysfs_root = kobject_create_and_add("hagent", mm_kobj);

@@ -39,3 +39,4 @@ u64 mt19937(void)
 	x ^= (x << 37) & 0xFFF7EEE000000000ULL; x ^= (x >> 43);
 	return x;
 }
+// clang-format on

@@ -17,7 +17,6 @@ enum mt19937_config {
 DECLARE_PER_CPU(u64[MT19937_NN], mt19947_mt);
 DECLARE_PER_CPU(u64, mt19947_mti);
 
-// clang-format off
 noinline u64 mt19937(void);
 
 #endif // !HAGENT_PLACEMENT_MT19937_H

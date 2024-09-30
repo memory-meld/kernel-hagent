@@ -1,6 +1,8 @@
+ccflags-y += -DDEFAULT_SYMBOL_NAMESPACE=HAGENT
+
 obj-$(CONFIG_HAGENT) += hagent_placement.o
 
-hagent_placement-objs += module.o sysfs.o core.o vector.o sds.o mt19937.o
+hagent_placement-objs += module.o sysfs.o core-new.o vector.o sds.o mt19937.o
 
 obj-$(CONFIG_HAGENT_TEST) += hagent_test.o
 

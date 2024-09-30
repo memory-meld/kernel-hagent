@@ -107,6 +107,7 @@ void get_kthread_comm(char *buf, size_t buf_size, struct task_struct *tsk)
 
 	strscpy_pad(buf, kthread->full_name, buf_size);
 }
+EXPORT_SYMBOL(get_kthread_comm);
 
 bool set_kthread_struct(struct task_struct *p)
 {

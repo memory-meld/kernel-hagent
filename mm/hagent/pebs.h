@@ -2,9 +2,10 @@
 #define HAGENT_PLACEMENT_PEBS_H
 
 #include <linux/perf_event.h>
-#include <../../kernel/events/internal.h>
+// #include <../../kernel/events/internal.h>
 
 struct perf_sample {
+	u32 config, config1;
 	u32 pid, tid;
 	u64 time;
 	u64 addr;
