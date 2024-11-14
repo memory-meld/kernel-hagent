@@ -6,22 +6,32 @@
  *
  */
 
+#include <linux/sched/cputime.h>
 #include <linux/sched/clock.h>
 #include <linux/mm.h>
 #include <linux/mm_inline.h>
+#include <linux/sort.h>
 #include <../internal.h>
 
+#include "error.h"
 #include "hagent.h"
 #include "pebs.h"
 #include "module.h"
 #include "mpsc.h"
-#include "sds.h"
 #include "indexable_heap.h"
+#include "range_tree.h"
 
 enum target_worker {
+	// Main thread initiate the range splitting and merging by notifying the
+	// policy via CHAN_SPLIT_REQ
 	WORKER_MAIN,
+	// Throttle thread periodically enable the perf events and disable them
+	// in a PWM like fashion
 	WORKER_THROTTLE,
+	// Policy thread is responsible for the heavy lifting of process samples
+	// and update range accounting/splitting/merging and initiate migration
 	WORKER_POLICY,
+	// Migration thread carries out the actual migration of folios
 	WORKER_MIGRATION,
 	MAX_WORKERS
 };
@@ -33,6 +43,8 @@ enum target_chan {
 	CHAN_EXCG_REQ,
 	// Can only be consumed by WORKER_POLICY
 	CHAN_EXCG_RSP,
+	// Can only be consumed by WORKER_POLICY
+	CHAN_SPLT_REQ,
 	MAX_CHANS,
 };
 
@@ -44,33 +56,30 @@ enum target_param {
 	MPSC_MAX_SIZE_BYTE = 1 << 20,
 	MPSC_MAX_BATCH = 16384,
 	IHEAP_MIN_SIZE = 512,
+	RMT_GRANULARITY = 2ul << 20,
+	RMT_MIN_SIZE = 3,
+	RMT_MAX_SIZE = 256,
+	RMT_SPLIT_FACTOR = 1,
+	// Fit at most MIGRATION_WMARK% of the total capacity during migration
+	MIGRATION_WMARK = 90,
+	MIGRAION_MAX_BATCH = (64ul << 20) / PAGE_SIZE,
+	MIGRATION_BSET_BUCKET = 32,
+	MIGRATION_BSET_BACKOFF = 128,
 	// EVENT_CURVE_LEN = 100,
 };
 
 enum target_stat {
-	STAT_T_OVERFLOW_HANDLER,
-	STAT_T_MAIN,
-	STAT_T_THROTTLE,
-	STAT_T_POLICY,
-	STAT_T_MIGRATION,
-	// STAT_T_MPSC,
-	// STAT_T_SDS,
-	// STAT_T_INDEXABLE_HEAP,
-	// STAT_T_EXCHANGE,
-	STAT_T_PERF_PREPARE,
+	STAT_OVERFLOW_HANDLER,
+	STAT_THROTTLE,
+	STAT_POLICY,
+	STAT_MIGRATION,
+	STAT_PERF_PREPARE,
+	STAT_SPLIT,
 	MAX_STATS,
 };
 static char *const target_stat_name[] = {
-	"overflow_handler",
-	"main",
-	"throttle",
-	"policy",
-	"migration",
-	// "mpsc",
-	// "sds",
-	// "indexable_heap",
-	// "exchange",
-	"perf_prepare",
+	"overflow_handler", "throttle",	    "policy",
+	"migration",	    "perf_prepare", "split",
 };
 
 struct target {
@@ -80,7 +89,6 @@ struct target {
 	mpsc_t chans[MAX_CHANS];
 	struct task_struct *workers[MAX_WORKERS];
 	// Should only be used by the throttle and main thread
-	struct perf_event_attr attrs[MAX_EVENTS];
 	struct perf_event *events[MAX_EVENTS];
 
 	atomic_long_t stats[MAX_STATS];
@@ -95,25 +103,35 @@ extern int folio_exchange_isolated(struct folio *, struct folio *,
 // Internal helpers
 static struct folio *uvirt_to_folio(struct mm_struct *mm, u64 user_addr);
 
+static inline u64 task_clock(void)
+{
+	u64 utime, stime = 0;
+	task_cputime_adjusted(current, &utime, &stime);
+	return stime;
+}
 struct stat_stopwatch {
 	struct target *target;
+	u64 (*clock)(void);
 	u64 start;
 	u64 item;
 };
-static struct stat_stopwatch stopwatch_new(struct target *target, u64 item)
+static struct stat_stopwatch stopwatch_new(struct target *target,
+					   u64 (*clock)(void), u64 item)
 {
 	return (struct stat_stopwatch){
 		.target = target,
+		.clock = clock,
 		.item = item,
-		.start = sched_clock(),
+		.start = clock(),
 	};
 }
 static void stopwatch_drop(struct stat_stopwatch *t)
 {
-	atomic_long_add(sched_clock() - t->start, &t->target->stats[t->item]);
+	atomic_long_add(t->clock() - t->start, &t->target->stats[t->item]);
 }
-DEFINE_CLASS(stat_stopwatch, struct stat_stopwatch, stopwatch_drop(&_T),
-	     stopwatch_new(s, item), struct target *s, enum target_stat item);
+DEFINE_CLASS(stat, struct stat_stopwatch, stopwatch_drop(&_T),
+	     stopwatch_new(s, clock, item), struct target *s,
+	     u64 (*clock)(void), enum target_stat item);
 
 DEFINE_LOCK_GUARD_1(mmap_read_lock, struct mm_struct, mmap_read_lock(_T->lock),
 		    mmap_read_unlock(_T->lock));
@@ -149,9 +167,10 @@ noinline static void target_events_overflow(struct perf_event *event,
 	mpsc_t ch = self->chans[CHAN_SAMPLE];
 	guard(rcu)();
 	guard(irqsave)();
-	guard(stat_stopwatch)(self, STAT_T_OVERFLOW_HANDLER);
+	// Not in a kthread context, try using the scheduler local_clock()
+	guard(stat)(self, local_clock, STAT_OVERFLOW_HANDLER);
 	{
-		guard(stat_stopwatch)(self, STAT_T_PERF_PREPARE);
+		guard(stat)(self, local_clock, STAT_PERF_PREPARE);
 		perf_prepare_sample(data, event, regs);
 	}
 	struct perf_sample s = {
@@ -186,37 +205,37 @@ static void target_events_enable(struct target *self, bool enable)
 		}
 	}
 }
-static void target_events_throttle(struct target *self, off_t step)
+static void worker_farewell(struct task_struct *task)
 {
-	// TODO: Change the period based on the predefined curves
-	// static u64 period_curves[EVENT_CURVE_LEN ][MAX_EVENTS];
+	char comm[64] = {};
+	get_kthread_comm(comm, sizeof(comm), task);
+	pr_info("%s: worker %pSR stopped name=%s usage=%u\n", __func__,
+		__builtin_return_address(0), comm, refcount_read(&task->usage));
 }
-static u64 target_event_weight(struct perf_sample *s)
-{
-	switch (s->config) {
-	case MEM_TRANS_RETIRED_LOAD_LATENCY:
-		return 3;
-	default:
-		return 1;
-	}
+struct splt_req {
+	u64 id, data;
 };
-
-noinline static int target_worker_main(struct target *self)
+noinline static int worker_main(struct target *self)
 {
-	u64 period = msecs_to_jiffies(throttle_pulse_period_ms);
+	mpsc_t splt_req = self->chans[CHAN_SPLT_REQ];
+	u64 period = msecs_to_jiffies(split_period_ms);
+	u64 id = 0;
 	while (!kthread_should_stop()) {
 		schedule_timeout_uninterruptible(period);
-		// guard(stat_stopwatch)(self, STAT_T_MAIN);
+		struct splt_req req = { .id = id++ };
+		if (mpsc_send(splt_req, &req, sizeof(req)) < 0) {
+			pr_err("%s: discard split request due to ring buffer overflow\n",
+			       __func__);
+			BUG();
+		}
+		// pr_info("%s: split request sent id=%llu\n", __func__, id - 1);
 	}
 
-	char comm[64] = {};
-	get_kthread_comm(comm, sizeof(comm), current);
-	pr_info("%s: stopped worker %s usage=%u\n", __func__, comm,
-		refcount_read(&current->usage));
+	worker_farewell(current);
 	return 0;
 }
 
-noinline static int target_worker_throttle(struct target *self)
+noinline static int worker_throttle(struct target *self)
 {
 	u64 period = msecs_to_jiffies(throttle_pulse_period_ms);
 	u64 width = msecs_to_jiffies(throttle_pulse_width_ms);
@@ -224,12 +243,12 @@ noinline static int target_worker_throttle(struct target *self)
 	while (!kthread_should_stop()) {
 		if (width) {
 			{
-				guard(stat_stopwatch)(self, STAT_T_THROTTLE);
+				guard(stat)(self, task_clock, STAT_THROTTLE);
 				target_events_enable(self, true);
 			}
 			schedule_timeout_uninterruptible(width);
 			{
-				guard(stat_stopwatch)(self, STAT_T_THROTTLE);
+				guard(stat)(self, task_clock, STAT_THROTTLE);
 				target_events_enable(self, false);
 			}
 			schedule_timeout_uninterruptible(period - width);
@@ -237,19 +256,27 @@ noinline static int target_worker_throttle(struct target *self)
 			schedule_timeout_uninterruptible(period);
 	}
 
-	char comm[64] = {};
-	get_kthread_comm(comm, sizeof(comm), current);
-	pr_info("%s: stopped worker %s usage=%u\n", __func__, comm,
-		refcount_read(&current->usage));
+	worker_farewell(current);
 	return 0;
 }
 
-noinline static void policy_release_managed(struct list_head *managed_folios)
+noinline static int manage_folio(struct list_head *managed, struct folio *folio)
+{
+	extern bool folio_isolate_lru(struct folio * folio);
+	guard(folio_get)(folio);
+	if (!folio_isolate_lru(folio))
+		return -EAGAIN;
+	list_add_tail(&folio->lru, managed);
+	node_stat_mod_folio(folio, NR_ISOLATED_ANON + folio_is_file_lru(folio),
+			    folio_nr_pages(folio));
+	return 0;
+}
+noinline static void unmanage_folio(struct list_head *managed)
 {
 	extern void folio_putback_lru(struct folio *);
 	// release managed set
 	struct folio *folio, *next;
-	list_for_each_entry_safe(folio, next, managed_folios, lru) {
+	list_for_each_entry_safe(folio, next, managed, lru) {
 		list_del(&folio->lru);
 		node_stat_mod_folio(folio,
 				    NR_ISOLATED_ANON + folio_is_file_lru(folio),
@@ -258,301 +285,224 @@ noinline static void policy_release_managed(struct list_head *managed_folios)
 		// folio_add_lru(folio);
 	}
 }
-noinline static int policy_manage_folio(struct list_head *managed_folios,
-					struct folio *folio)
-{
-	extern bool folio_isolate_lru(struct folio * folio);
-	guard(folio_get)(folio);
-	if (!folio_isolate_lru(folio))
-		return -EAGAIN;
-	list_add_tail(&folio->lru, managed_folios);
-	node_stat_mod_folio(folio, NR_ISOLATED_ANON + folio_is_file_lru(folio),
-			    folio_nr_pages(folio));
-	return 0;
-}
-
 struct policy_worker {
 	pid_t pid;
-	// mset > fmem + smem + tset
-	HashMapU64Ptr *mset;
-	HashMapU64U64 *tset, *bset;
-	struct list_head *managed_folios;
-	struct sds *sds;
-	struct indexable_heap *fmem, *smem;
-	mpsc_t samples, excg_req, excg_rsp;
+	struct range_tree *rt;
+	struct mrange **mrs; // mset > fmem + smem + tset
+	mpsc_t samplech, excg_req, excg_rsp, splt_req;
+	ulong (*node_avail_pages)(int);
 };
 struct exch_req {
-	u64 id;
-	u64 vpfn0, vpfn1;
-	struct folio *folio0, *folio1;
+	struct list_head *promotion, *demotion;
 };
 struct exch_rsp {
-	u64 id;
-	u64 vpfn0, vpfn1;
-	struct folio *folio0, *folio1;
-	int err;
+	struct list_head *promotion, *demotion;
 };
-
 noinline static int policy_handle_sample_one(struct policy_worker *data,
 					     struct mm_struct *mm,
 					     struct perf_sample *s)
 {
-	pid_t pid = data->pid;
-	HashMapU64Ptr *mset = data->mset;
-	HashMapU64U64 *tset = data->tset, *bset = data->bset;
-	struct list_head *managed_folios = data->managed_folios;
-	struct sds *sds = data->sds;
-	struct indexable_heap *fmem = data->fmem, *smem = data->smem;
-
-	u64 vpfn = s->addr >> PAGE_SHIFT;
-	if (!vpfn)
-		return -EINVAL;
-	if (HashMapU64U64_contains(bset, &vpfn))
-		return -EPERM;
-	if (pid != s->pid)
-		return -ESRCH;
-	CLASS(uvirt_folio, folio)(mm, s->addr);
-	if (IS_ERR_OR_NULL(folio))
-		return -EFAULT;
-	if (folio_ref_count(folio) < 2)
-		return -ESTALE;
-	// See uvirt_to_folio()
-	BUG_ON(folio_mapping(folio));
-	// Check if the page is in the managed set or under migration
-	if (HashMapU64Ptr_contains(mset, &vpfn)) {
-	} else if (folio_test_lru(folio)) {
-		// Found a new lru folio that should be managed by us
-		int err = policy_manage_folio(managed_folios, folio);
-		if (err)
-			return err;
-		HashMapU64Ptr_Entry const entry = { vpfn, folio };
-		HashMapU64Ptr_insert(mset, &entry);
-	} else
-		return -EPERM;
-	// Update frequency info for folios managed by us
-	bool in_fmem = folio_nid(folio) == FMEM_NID;
-	struct indexable_heap *heap = in_fmem ? fmem : smem;
-
-	u64 count = sds_push_multiple(sds, vpfn, target_event_weight(s));
-	if (HashMapU64U64_contains(tset, &vpfn)) {
-		// The folio is under migration record the frequency in the tset
-		HashMapU64U64_Entry e = { vpfn, count };
-		HashMapU64U64_update(tset, &e);
-	} else if (indexable_heap_contains(heap, vpfn)) {
-		// Update existing folio
-		if (count)
-			indexable_heap_update(heap, vpfn, count);
-		else if (!in_fmem)
-			indexable_heap_erase(heap, vpfn);
-		// FMEM folios without access means they are cold and are great
-		// candidates for demotion. But cold SMEM does not worth caring.
-	} else {
-		// Potential a decayed folio getting accessed again or just
-		// plainly a new folio
-		if (count)
-			indexable_heap_push(heap, vpfn, count);
+	struct range_tree *rt = data->rt;
+	// ulong *nr_access = data->nr_access;
+	ulong vaddr = s->addr;
+	if (vaddr < mm->start_brk || vaddr >= mm->mmap_base) {
+		// pr_err_ratelimited(
+		// 	"%s: vaddr=%#lx not in [start_brk=%#lx, mmap_base=%#lx)\n",
+		// 	__func__, vaddr, mm->start_brk, mm->mmap_base);
+		return -ECBADSAMPLE;
 	}
-
-	count_vm_event(in_fmem ? PEBS_NR_SAMPLED_FMEM : PEBS_NR_SAMPLED_SMEM);
+	TRY(rt_count(rt, vaddr));
 	return 0;
 }
 noinline static int policy_handle_samples(struct policy_worker *data,
 					  struct mm_struct *mm)
 {
-	mpsc_t samples = data->samples;
-	int cpu, received = 0, discarded = 0;
-	for_each_online_cpu(cpu)
-		for (int fail = 0; fail < MPSC_RETRY;) {
-			struct perf_sample s;
-			ssize_t size =
-				mpsc_recv_cpu(samples, cpu, &s, sizeof(s));
-			if (size != sizeof(s)) {
-				++fail;
-				continue;
-			}
-			// TODO: check return value and account failed samples
-			int err = policy_handle_sample_one(data, mm, &s);
-			if (err < 0) {
-				// TODO: error accounting
-				// pr_err_ratelimited("%s: discard sample due to error %pe\n", __func__, ERR_PTR(err));
-				++discarded;
-			} else {
-				++received;
-			}
-			if (received + discarded > MPSC_MAX_BATCH)
-				goto out;
+	mpsc_t samplech = data->samplech;
+	int received = 0, discarded = 0;
+	struct perf_sample s = {};
+	mpsc_for_each(samplech, s) {
+		int err = policy_handle_sample_one(data, mm, &s);
+		if (err < 0) {
+			++discarded;
+		} else {
+			++received;
 		}
+		if (received + discarded > MPSC_MAX_BATCH)
+			goto out;
+	}
 out:
 	count_vm_events(PEBS_NR_SAMPLED, received);
 	count_vm_events(PEBS_NR_DISCARDED, discarded);
 	return received;
 }
-noinline static int policy_send_exch_reqs(struct policy_worker *data)
+noinline static int policy_send_exch_reqs(struct policy_worker *data,
+					  struct mm_struct *mm)
 {
-	static atomic_long_t seq = {};
-	struct indexable_heap *fmem = data->fmem, *smem = data->smem;
-	HashMapU64Ptr *mset = data->mset;
-	HashMapU64U64 *tset = data->tset;
+	struct range_tree *rt = data->rt;
+	struct mrange **mrs = data->mrs;
+	ulong (*fn)(int) = data->node_avail_pages;
 	mpsc_t excg_req = data->excg_req;
+	if (rt->len < RTREE_MIN_SIZE)
+		return -EAGAIN;
+	struct list_head *promo = TRY(
+				 kmem_cache_alloc(list_head_cache, GFP_KERNEL)),
+			 *demo = TRY(
+				 kmem_cache_alloc(list_head_cache, GFP_KERNEL));
+	INIT_LIST_HEAD(promo), INIT_LIST_HEAD(demo);
+	guard(mmap_read_lock)(mm);
+	ulong rlen = rt->len;
+	TRY(rt_rank(rt, mm, mrs, &rlen));
 
-	int sent = 0;
-	while (indexable_heap_size(fmem) > IHEAP_MIN_SIZE &&
-	       indexable_heap_size(smem) > IHEAP_MIN_SIZE) {
-		u64 vpfn0 = *kv_ckey(indexable_heap_peek(fmem)),
-		    count0 = *kv_cvalue(indexable_heap_peek(fmem)),
-		    vpfn1 = *kv_ckey(indexable_heap_peek(smem)),
-		    count1 = *kv_cvalue(indexable_heap_peek(smem));
-		if (count0 >= count1 || sent > MPSC_MAX_BATCH)
-			break;
-		struct folio *folio0 = HashMapU64Ptr_get(mset, &vpfn0),
-			     *folio1 = HashMapU64Ptr_get(mset, &vpfn1);
-		indexable_heap_pop(fmem);
-		if (IS_ERR_OR_NULL(folio0) || folio_nid(folio0) != FMEM_NID)
-			continue;
-		indexable_heap_pop(smem);
-		if (IS_ERR_OR_NULL(folio1) || folio_nid(folio1) != SMEM_NID)
-			continue;
-
-		HashMapU64U64_Entry e0 = { vpfn0, count0 };
-		HashMapU64U64_insert(tset, &e0);
-		HashMapU64U64_Entry e1 = { vpfn1, count1 };
-		HashMapU64U64_insert(tset, &e1);
-
-		struct exch_req req = {
-			.id = atomic_long_fetch_add(1, &seq),
-			.vpfn0 = vpfn0,
-			.vpfn1 = vpfn1,
-			.folio0 = folio0,
-			.folio1 = folio1,
-		};
-		if (mpsc_send(excg_req, &req, sizeof(req)) < 0) {
-			pr_err("%s: discard exchange request due to ring buffer overflow\n",
-			       __func__);
-			BUG();
-		} else {
-			++sent;
-		}
+	// ranges [0, s) should be placed in smem
+	// ranges [f, olen) should be placed in fmem
+	ulong s = 0, f = rlen;
+	for (ulong i = 0, len = rlen, fmem = 0, smem = 0,
+		   fmem_cap = fn(FMEM_NID), smem_cap = fn(SMEM_NID);
+	     i < len; i++) {
+		struct mrange *p = mrs[i], *q = mrs[len - 1 - i];
+		if (smem_cap > (smem += p->in_smem + p->in_smem))
+			s += 1;
+		if (fmem_cap > (fmem += q->in_smem + q->in_smem))
+			f -= 1;
 	}
-	return sent;
+
+	pr_info("%s: rank ranges count=%lu smem=[0, %lu) fmem=[%lu, %lu) smem_cap=%luM fmem_cap=%luM\n",
+		__func__, rt->len, s, f, rt->len,
+		fn(SMEM_NID) << PAGE_SHIFT >> 20,
+		fn(FMEM_NID) << PAGE_SHIFT >> 20);
+	for (ulong i = 0; i < rt->len; i++) {
+		mrange_show(mrs[i]);
+	}
+
+	// isolate folios based on the ranges above
+	for (ulong i = 0; i <= s; i++) {
+		struct mrange *r = mrs[i];
+		ulong total = r->in_fmem;
+		ulong got = rt_isolate(mm, r, FMEM_NID, manage_folio, demo);
+		// TODO: count the isolated folios
+	}
+	for (ulong i = f; i < rlen; i++) {
+		struct mrange *r = mrs[i];
+		ulong total = r->in_smem;
+		ulong got = rt_isolate(mm, r, SMEM_NID, manage_folio, promo);
+	}
+
+	// send exchange request
+	struct exch_req req = {
+		.promotion = promo,
+		.demotion = demo,
+	};
+	if (mpsc_send(excg_req, &req, sizeof(req)) < 0) {
+		pr_err("%s: discard exchange request due to ring buffer overflow\n",
+		       __func__);
+		BUG();
+	}
+	return 0;
 }
-noinline static int policy_handle_exch_rsp_one(struct policy_worker *data,
-					       struct exch_rsp *rsp)
+
+noinline static int policy_handle_splt_reqs(struct policy_worker *data,
+					    struct mm_struct *mm)
 {
-	struct indexable_heap *fmem = data->fmem, *smem = data->smem;
-	HashMapU64U64 *tset = data->tset, *bset = data->bset;
-	int error = rsp->err;
-	u64 vpfn0 = rsp->vpfn0, vpfn1 = rsp->vpfn1;
-
-	HashMapU64U64_Iter iter0 = HashMapU64U64_find(tset, &vpfn0),
-			   iter1 = HashMapU64U64_find(tset, &vpfn1);
-	HashMapU64U64_Entry *e0 = HashMapU64U64_Iter_get(&iter0),
-			    *e1 = HashMapU64U64_Iter_get(&iter1);
-	BUG_ON(IS_ERR_OR_NULL(e0) || IS_ERR_OR_NULL(e1));
-	u64 count0 = e0->val, count1 = e1->val;
-	HashMapU64U64_erase(tset, &vpfn0);
-	HashMapU64U64_erase(tset, &vpfn1);
-
-	switch (error) {
-	case -ENOTSUPP:
-		HashMapU64U64_Entry e0 = { vpfn0, count0 };
-		HashMapU64U64_insert(bset, &e0);
-		if (indexable_heap_contains(smem, vpfn1))
-			indexable_heap_update(smem, vpfn1, count1);
+	mpsc_t splt_req = data->splt_req;
+	struct range_tree *rt = data->rt;
+	ulong done = 0;
+	struct splt_req req = {};
+	mpsc_for_each(splt_req, req) {
+		ulong diff = ({
+			ulong len = rt->len;
+			rt_split(rt);
+			rt->len - len;
+		});
+		if (!diff)
+			continue;
+		pr_info("%s: split request success id=%llu\n", __func__,
+			req.id);
+		rt_show(rt);
+		long err = policy_send_exch_reqs(data, mm);
+		if (err < 0)
+			pr_err_ratelimited("%s: policy_send_exch_reqs()=%pe\n",
+					   __func__, ERR_PTR(err));
 		else
-			indexable_heap_push(smem, vpfn1, count1);
-		break;
-	case -ENOTSUPP + 1:
-		if (indexable_heap_contains(fmem, vpfn0))
-			indexable_heap_update(fmem, vpfn0, count0);
-		else
-			indexable_heap_push(fmem, vpfn0, count0);
-		HashMapU64U64_Entry e1 = { vpfn1, count1 };
-		HashMapU64U64_insert(bset, &e1);
-		error = -ENOTSUPP;
-		break;
-	case 0:
-		swap(fmem, smem);
-		fallthrough;
-	default:
-		if (indexable_heap_contains(fmem, vpfn0))
-			indexable_heap_update(fmem, vpfn0, count0);
-		else
-			indexable_heap_push(fmem, vpfn0, count0);
-		if (indexable_heap_contains(smem, vpfn1))
-			indexable_heap_update(smem, vpfn1, count1);
-		else
-			indexable_heap_push(smem, vpfn1, count1);
-		break;
+			done += 1;
 	}
-	return error;
+	return done;
 }
 noinline static int policy_handle_exch_rsps(struct policy_worker *data)
 {
 	mpsc_t excg_rsp = data->excg_rsp;
-	int cpu, done = 0;
-	for_each_online_cpu(cpu)
-		for (int fail = 0; fail < MPSC_RETRY;) {
-			struct exch_rsp rsp;
-			ssize_t size =
-				mpsc_recv_cpu(excg_rsp, cpu, &rsp, sizeof(rsp));
-			if (size != sizeof(rsp)) {
-				++fail;
-				continue;
-			}
-			++done;
-			policy_handle_exch_rsp_one(data, &rsp);
-		}
+	int done = 0;
+	struct exch_rsp rsp = {};
+	mpsc_for_each(excg_rsp, rsp) {
+		++done;
+		unmanage_folio(rsp.promotion);
+		unmanage_folio(rsp.demotion);
+		kmem_cache_free(list_head_cache, rsp.demotion);
+		kmem_cache_free(list_head_cache, rsp.promotion);
+	}
 	return done;
 }
-noinline static int target_worker_policy(struct target *self)
+
+static void kmalloc_cleanup(const void *p)
+{
+	if (IS_ERR_OR_NULL(p))
+		return;
+	if (IS_ERR_OR_NULL(*(void **)p))
+		return;
+	kfree(*(void **)p);
+}
+
+noinline static int worker_policy(struct target *self)
 {
 	// Shared data
-	mpsc_t samples = self->chans[CHAN_SAMPLE];
+	mpsc_t samplech = self->chans[CHAN_SAMPLE];
 	mpsc_t excg_req = self->chans[CHAN_EXCG_REQ];
 	mpsc_t excg_rsp = self->chans[CHAN_EXCG_RSP];
+	mpsc_t splt_req = self->chans[CHAN_SPLT_REQ];
 
 	// Thread private data initialization
-	// mangaed set
-	HashMapU64Ptr __cleanup(HashMapU64Ptr_destroy)
-		mset = HashMapU64Ptr_new(POLICY_MSET_BUCKET);
-	struct list_head __cleanup(policy_release_managed)
-		managed_folios = LIST_HEAD_INIT(managed_folios);
-	// sds
-	struct sds __cleanup(sds_drop) sds;
-	BUG_ON(sds_init_default(&sds));
-	// indexable_heap
-	struct indexable_heap __cleanup(indexable_heap_drop) fmem;
-	BUG_ON(indexable_heap_init(&fmem, true, "fmem"));
-	struct indexable_heap __cleanup(indexable_heap_drop) smem;
-	BUG_ON(indexable_heap_init(&smem, false, "smem"));
-	// tset: temporay storage for folios under migration
-	HashMapU64U64 __cleanup(HashMapU64U64_destroy)
-		tset = HashMapU64U64_new(POLICY_TSET_BUCKET);
-	// bset: blacklisted folios which canot be migrated
-	HashMapU64U64 __cleanup(HashMapU64U64_destroy)
-		bset = HashMapU64U64_new(POLICY_BSET_BUCKET);
+	// rmt: the "range_tree" to record the managed ranges
+	struct range_tree __cleanup(rt_drop) rt = {};
+	{
+		CLASS(task_mm, mm)(self->victim);
+		BUG_ON(IS_ERR_OR_NULL(mm));
+		BUG_ON(rt_init(&rt, mm->start_brk, mm->mmap_base));
+		rt_show(&rt);
+		pr_info("%s: mm_struct layout start_code=%#lx end_code=%#lx start_data=%#lx end_data=%#lx start_brk=%#lx brk=%#lx start_stack=%#lx arg_start=%#lx arg_end=%#lx env_start=%#lx env_end=%#lx mmap_base=%#lx mmap_legacy_base=%#lx\n",
+			__func__, mm->start_code, mm->end_code, mm->start_data,
+			mm->end_data, mm->start_brk, mm->brk, mm->start_stack,
+			mm->arg_start, mm->arg_end, mm->env_start, mm->env_end,
+			mm->mmap_base, mm->mmap_legacy_base);
+	}
+	__cleanup(kmalloc_cleanup) struct mrange **mrs =
+		TRY(kcalloc(RTREE_MAX_SIZE, sizeof(*mrs), GFP_KERNEL));
+	BUG_ON(!mrs);
+
+	extern ulong node_avail_pages(int nid);
+	ulong (*fn)(int) = symbol_get(node_avail_pages);
+	BUG_ON(!fn);
+	pr_info("%s: symbol_get(node_avail_pages)=%pe\n", __func__,
+		ERR_PTR((long)fn));
+
 	struct policy_worker data = {
 		.pid = self->victim->tgid,
-		.mset = &mset,
-		.tset = &tset,
-		.bset = &bset,
-		.managed_folios = &managed_folios,
-		.sds = &sds,
-		.fmem = &fmem,
-		.smem = &smem,
-		.samples = samples,
+		.rt = &rt,
+		.mrs = mrs,
+		.samplech = samplech,
 		.excg_req = excg_req,
 		.excg_rsp = excg_rsp,
+		.splt_req = splt_req,
+		.node_avail_pages = fn,
 	};
 
 	// reporting is rate limited to every 500ms
 	DEFINE_RATELIMIT_STATE(report_rs, msecs_to_jiffies(500), 1);
 
 	u64 sample_count = 0, excg_req_count = 0, excg_rsp_count = 0,
-	    report_period = 50000, next_report = report_period, backoff = 500;
+	    report_period = 50000, next_report = report_period,
+	    initial_backoff = 500, backoff = initial_backoff;
 	while (!kthread_should_stop()) {
-		int which = mpsc_select(excg_rsp, samples);
-		guard(stat_stopwatch)(self, STAT_T_POLICY);
+		int which = mpsc_select3(excg_rsp, splt_req, samplech);
+		guard(stat)(self, task_clock, STAT_POLICY);
 		switch (which) {
 		case -ERESTARTSYS:
 			pr_warn_ratelimited("%s: interrupted\n", __func__);
@@ -569,6 +519,23 @@ noinline static int target_worker_policy(struct target *self)
 				schedule_timeout_interruptible(
 					msecs_to_jiffies(backoff *= 2));
 				continue;
+			} else {
+				backoff = initial_backoff;
+			}
+			guard(stat)(self, task_clock, STAT_SPLIT);
+			excg_rsp_count += policy_handle_splt_reqs(&data, mm);
+			break;
+		}
+		case 2: {
+			CLASS(task_mm, mm)(self->victim);
+			if (unlikely(IS_ERR_OR_NULL(mm))) {
+				pr_err("%s: victim mm=%pe\n", __func__, mm);
+				// exit early will cause kthread_stop to panic
+				schedule_timeout_interruptible(
+					msecs_to_jiffies(backoff *= 2));
+				continue;
+			} else {
+				backoff = initial_backoff;
 			}
 			sample_count += policy_handle_samples(&data, mm);
 			break;
@@ -576,11 +543,8 @@ noinline static int target_worker_policy(struct target *self)
 		default:
 			pr_err("%s: unknown channel or error %pe\n", __func__,
 			       ERR_PTR(which));
-
 			BUG();
 		}
-		// Try sending migration requests
-		excg_req_count += policy_send_exch_reqs(&data);
 
 		u64 curr_report =
 			max(sample_count, max(excg_req_count, excg_rsp_count));
@@ -592,38 +556,115 @@ noinline static int target_worker_policy(struct target *self)
 		}
 	}
 
-	char comm[64] = {};
-	get_kthread_comm(comm, sizeof(comm), current);
-	pr_info("%s: stopped worker %s usage=%u\n", __func__, comm,
-		refcount_read(&current->usage));
+	symbol_put(node_avail_pages);
+	worker_farewell(current);
 	return 0;
 }
 
-noinline static int migration_handle_req(struct exch_req *req)
+noinline static int migration_handle_req(struct exch_req *req,
+					 HashMapU64U64 *bset)
 {
-	struct folio *folio0 = req->folio0, *folio1 = req->folio1;
-	u64 vpfn0 = req->vpfn0, vpfn1 = req->vpfn1;
-	int err = folio_exchange_isolated(folio0, folio1, MIGRATE_SYNC);
-	if (err) {
-		// clang-format off
-		pr_err_ratelimited("%s: folio_exchange_isolated: mode=%d err=%pe [src=%p vaddr=%p pfn=0x%lx] <-> [dst=%p vaddr=%p pfn=0x%lx]",
-		       __func__, MIGRATE_SYNC, ERR_PTR(err),
-		       folio0, (void *)(vpfn0 << PAGE_SHIFT), folio_pfn(folio0),
-		       folio1, (void *)(vpfn1 << PAGE_SHIFT), folio_pfn(folio1));
-		// clang-format on
+	struct list_head *p = req->promotion, *d = req->demotion;
+	LIST_HEAD(promotion_done);
+	LIST_HEAD(demotion_done);
+	ulong success = 0, failure = 0;
+	while (!list_empty(p) && !list_empty(d)) {
+		// fifo order
+		struct folio *folio0 = list_entry(p->next, struct folio, lru),
+			     *folio1 = list_entry(d->next, struct folio, lru);
+
+		u64 pfn;
+		pfn = folio_pfn(folio0);
+		if (HashMapU64U64_contains(bset, &pfn)) {
+			HashMapU64U64_Iter iter =
+				HashMapU64U64_find(bset, &pfn);
+			HashMapU64U64_Entry *e = HashMapU64U64_Iter_get(&iter);
+			if (++e->val > MIGRATION_BSET_BACKOFF)
+				HashMapU64U64_erase(bset, &pfn);
+			list_move_tail(p->next, &promotion_done);
+			continue;
+		}
+		if (!folio_test_anon(folio0)) {
+			list_move_tail(p->next, &promotion_done);
+			HashMapU64U64_Entry e = { folio_pfn(folio0), 0 };
+			CHECK_INSERTED(HashMapU64U64_insert(bset, &e), true,
+				       "cannot blacklist folio0 pfn=0x%lx",
+				       folio_pfn(folio0));
+			continue;
+		}
+
+		pfn = folio_pfn(folio1);
+		if (HashMapU64U64_contains(bset, &pfn)) {
+			HashMapU64U64_Iter iter =
+				HashMapU64U64_find(bset, &pfn);
+			HashMapU64U64_Entry *e = HashMapU64U64_Iter_get(&iter);
+			if (++e->val > MIGRATION_BSET_BACKOFF)
+				HashMapU64U64_erase(bset, &pfn);
+			list_move_tail(d->next, &demotion_done);
+			continue;
+		}
+		if (!folio_test_anon(folio1)) {
+			list_move_tail(d->next, &demotion_done);
+			HashMapU64U64_Entry e = { folio_pfn(folio1), 0 };
+			CHECK_INSERTED(HashMapU64U64_insert(bset, &e), true,
+				       "cannot blacklist folio1 pfn=0x%lx",
+				       folio_pfn(folio1));
+			continue;
+		}
+
+		int err = folio_exchange_isolated(folio0, folio1, MIGRATE_SYNC);
+		if (err) {
+			pr_err_ratelimited(
+				"%s: folio_exchange_isolated: mode=%d err=%pe [src=%p pfn=0x%lx] <-> [dst=%p pfn=0x%lx]",
+				__func__, MIGRATE_SYNC, ERR_PTR(err), folio0,
+				folio_pfn(folio0), folio1, folio_pfn(folio1));
+			++failure;
+		}
+		switch (err) {
+		case -ENOTSUPP: {
+			// folio0 failed, blacklist
+			list_move_tail(p->next, &promotion_done);
+			HashMapU64U64_Entry e = { folio_pfn(folio0), 0 };
+			CHECK_INSERTED(HashMapU64U64_insert(bset, &e), true,
+				       "cannot blacklist folio0 pfn=0x%lx",
+				       folio_pfn(folio0));
+			break;
+		}
+		case -ENOTSUPP + 1: {
+			// folio1 failed, blacklist
+			list_move_tail(d->next, &demotion_done);
+			HashMapU64U64_Entry e = { folio_pfn(folio1), 0 };
+			CHECK_INSERTED(HashMapU64U64_insert(bset, &e), true,
+				       "cannot blacklist folio1 pfn=0x%lx",
+				       folio_pfn(folio1));
+			break;
+		}
+		case 0:
+			// success
+			++success;
+			fallthrough;
+		default:
+			// ignore other error
+			list_move_tail(p->next, &promotion_done);
+			list_move_tail(d->next, &demotion_done);
+			break;
+		}
 	}
-	return err;
+	pr_info("%s: success=%lu failure=%lu\n", __func__, success, failure);
+
+	// FIXME: handle the remaining folios via the old-fashioned
+	// migrate_pages when the two lists are not balanced
+
+	unmanage_folio(&promotion_done);
+	unmanage_folio(&demotion_done);
+	return 0;
 }
 noinline static int migration_send_ack(mpsc_t excg_rsp, struct exch_req *req,
 				       int error)
 {
 	struct exch_rsp rsp = {
-		.id = req->id,
-		.vpfn0 = req->vpfn0,
-		.vpfn1 = req->vpfn1,
-		.folio0 = req->folio0,
-		.folio1 = req->folio1,
-		.err = error,
+		.promotion = req->promotion,
+		.demotion = req->demotion,
 	};
 	int err = mpsc_send(excg_rsp, &rsp, sizeof(rsp));
 	if (err < 0) {
@@ -633,29 +674,31 @@ noinline static int migration_send_ack(mpsc_t excg_rsp, struct exch_req *req,
 	}
 	return err;
 }
-noinline static int migration_handle_requests(mpsc_t excg_req, mpsc_t excg_rsp)
+noinline static int migration_handle_requests(mpsc_t excg_req, mpsc_t excg_rsp,
+					      HashMapU64U64 *bset)
 {
-	int cpu, received = 0;
-	for_each_online_cpu(cpu)
-		for (int fail = 0; fail < MPSC_RETRY;) {
-			struct exch_req req;
-			ssize_t size =
-				mpsc_recv_cpu(excg_req, cpu, &req, sizeof(req));
-			if (size != sizeof(req)) {
-				++fail;
-				continue;
-			}
-			++received;
-			migration_send_ack(excg_rsp, &req,
-					   migration_handle_req(&req));
-		}
+	int received = 0;
+	struct exch_req req = {};
+	mpsc_for_each(excg_req, req) {
+		++received;
+		migration_send_ack(excg_rsp, &req,
+				   migration_handle_req(&req, bset));
+	}
 	return received;
 }
 
-noinline static int target_worker_migration(struct target *self)
+noinline static int worker_migration(struct target *self)
 {
 	mpsc_t excg_req = self->chans[CHAN_EXCG_REQ],
 	       excg_rsp = self->chans[CHAN_EXCG_RSP];
+	// bset: blacklisted folios which canot be migrated
+	HashMapU64U64 __cleanup(HashMapU64U64_destroy)
+		bset = HashMapU64U64_new(MIGRATION_BSET_BUCKET);
+	extern ulong node_balloon_pages(int nid);
+	ulong (*fn)(int) = symbol_get(node_balloon_pages);
+	BUG_ON(!fn);
+	pr_info("%s: symbol_get(node_balloon_pages)=%pe\n", __func__,
+		ERR_PTR((long)fn));
 
 	u64 excg_count = 0, report_period = 500, next_report = report_period;
 	// reporting is rate limited to every 1000ms
@@ -663,14 +706,23 @@ noinline static int target_worker_migration(struct target *self)
 
 	while (!kthread_should_stop()) {
 		int err = mpsc_wait(excg_req);
-		guard(stat_stopwatch)(self, STAT_T_MIGRATION);
+		guard(stat)(self, task_clock, STAT_MIGRATION);
 		switch (err) {
 		case -ERESTARTSYS:
 			pr_warn_ratelimited("%s: interrupted\n", __func__);
 			continue;
 		case 0:
-			excg_count +=
-				migration_handle_requests(excg_req, excg_rsp);
+			// pr_info("%s: excg_req received\n", __func__);
+			excg_count += migration_handle_requests(
+				excg_req, excg_rsp, &bset);
+			// ulong fmem_cap = FMEM_NODE->node_present_pages,
+			//       smem_cap = SMEM_NODE->node_present_pages,
+			//       fmem_bln = fn(FMEM_NID), smem_bln = fn(SMEM_NID);
+			// pr_info("%s: fmem_cap=%luM smem_cap=%luM fmem_bln=%luM smem_bln=%luM\n",
+			// 	__func__, fmem_cap << PAGE_SHIFT >> 20,
+			// 	smem_cap << PAGE_SHIFT >> 20,
+			// 	fmem_bln << PAGE_SHIFT >> 20,
+			// 	smem_bln << PAGE_SHIFT >> 20);
 			break;
 		default:
 			pr_err("%s: unknown error %d\n", __func__, err);
@@ -682,12 +734,23 @@ noinline static int target_worker_migration(struct target *self)
 		}
 	}
 
-	char comm[64] = {};
-	get_kthread_comm(comm, sizeof(comm), current);
-	pr_info("%s: stopped worker %s usage=%u\n", __func__, comm,
-		refcount_read(&current->usage));
+	symbol_put(node_avail_pages);
+	worker_farewell(current);
 	return 0;
 }
+
+static int (*worker_fns[])(void *) = {
+	[WORKER_MAIN] = (void *)worker_main,
+	[WORKER_THROTTLE] = (void *)worker_throttle,
+	[WORKER_POLICY] = (void *)worker_policy,
+	[WORKER_MIGRATION] = (void *)worker_migration,
+};
+static char *const worker_names[] = {
+	[WORKER_MAIN] = "main",
+	[WORKER_THROTTLE] = "throttle",
+	[WORKER_POLICY] = "policy",
+	[WORKER_MIGRATION] = "migration",
+};
 
 pid_t target_pid(struct target *self)
 {
@@ -710,7 +773,8 @@ void target_drop(struct target *self)
 			continue;
 		char comm[64] = {};
 		get_kthread_comm(comm, sizeof(comm), t);
-		pr_info("%s: stopping worker %s usage=%u\n", __func__, comm,
+		pr_info("%s: try to stop %s worker comm=%s usage=%u\n",
+			__func__, worker_names[i], comm,
 			refcount_read(&t->usage));
 		// The worker must not exit before we stop it
 		kthread_stop(t);
@@ -725,19 +789,6 @@ void target_drop(struct target *self)
 }
 struct target *target_new(pid_t pid)
 {
-	static int (*fns[])(void *) = {
-		[WORKER_MAIN] = (void *)target_worker_main,
-		[WORKER_THROTTLE] = (void *)target_worker_throttle,
-		[WORKER_POLICY] = (void *)target_worker_policy,
-		[WORKER_MIGRATION] = (void *)target_worker_migration,
-	};
-	static char *const names[] = {
-		[WORKER_MAIN] = "main",
-		[WORKER_THROTTLE] = "throttle",
-		[WORKER_POLICY] = "policy",
-		[WORKER_MIGRATION] = "migration",
-	};
-
 	struct target *self = kzalloc(sizeof(*self), GFP_KERNEL);
 	if (!self)
 		return ERR_PTR(-ENOMEM);
@@ -754,11 +805,11 @@ struct target *target_new(pid_t pid)
 		}
 		self->chans[i] = ch;
 	}
-	BUILD_BUG_ON(ARRAY_SIZE(fns) != MAX_WORKERS);
-	BUILD_BUG_ON(ARRAY_SIZE(names) != MAX_WORKERS);
+	BUILD_BUG_ON(ARRAY_SIZE(worker_fns) != MAX_WORKERS);
+	BUILD_BUG_ON(ARRAY_SIZE(worker_names) != MAX_WORKERS);
 	for (int i = 0; i < MAX_WORKERS; i++) {
-		struct task_struct *t =
-			kthread_run(fns[i], self, "ht-%s/%d", names[i], pid);
+		struct task_struct *t = kthread_run(
+			worker_fns[i], self, "ht-%s/%d", worker_names[i], pid);
 		if (IS_ERR_OR_NULL(t)) {
 			target_drop(self);
 			return ERR_PTR(-ECHILD);
