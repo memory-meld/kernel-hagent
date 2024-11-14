@@ -41,6 +41,8 @@ extern ulong throttle_pulse_width_ms;
 extern ulong throttle_pulse_period_ms;
 extern ulong split_period_ms;
 
+extern struct kmem_cache *list_head_cache;
+
 DECLARE_STATIC_KEY_TRUE(use_asynchronous_architecture);
 
 #endif // !HAGENT_PLACEMENT_MODULE_H

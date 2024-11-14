@@ -55,8 +55,8 @@ module_param_named(split_period_ms, split_period_ms, ulong, 0644);
 MODULE_PARM_DESC(split_period_ms, "Split period in ms, defaults to 200");
 
 
-
 DEFINE_STATIC_KEY_TRUE(should_decay_sketch);
+struct kmem_cache *list_head_cache;
 
 static void intel_pmu_print_debug_all(void)
 {
@@ -152,6 +152,11 @@ static void sds_update_param(void)
 
 static __init int init(void)
 {
+	list_head_cache = KMEM_CACHE(list_head, 0);
+	if (!list_head_cache) {
+		pr_err("Failed to create list_head cache\n");
+		return -ENOMEM;
+	}
 	sds_update_param();
 	event_attrs_update_param();
 	return hagent_sysfs_init();
@@ -160,6 +165,7 @@ static __init int init(void)
 static __exit void exit(void)
 {
 	hagent_sysfs_exit();
+	kmem_cache_destroy(list_head_cache);
 }
 
 module_init(init);
