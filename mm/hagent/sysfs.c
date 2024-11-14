@@ -69,6 +69,7 @@ static ssize_t pid_store(struct kobject *kobj, struct kobj_attribute *attr,
 	}
 	if (t->target) {
 		target_drop(t->target);
+		t->target = NULL;
 	}
 	if (pid == -1) {
 		mutex_unlock(&hagent_sysfs_lock);
