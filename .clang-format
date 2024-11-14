@@ -687,6 +687,9 @@ ForEachMacros:
   - 'xbc_node_for_each_key_value'
   - 'xbc_node_for_each_subkey'
   - 'zorro_for_each_dev'
+  - 'mpsc_for_each'
+  - 'vma_for_each'
+  - 'folio_for_each'
 
 IncludeBlocks: Preserve
 IncludeCategories:
