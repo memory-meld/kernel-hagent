@@ -10,14 +10,17 @@
 #define SMEM_NODE (NODE_DATA(SMEM_NID))
 
 enum module_param_defaults {
-	SAMPLE_PERIOD = 4023,
+	LOAD_LATENCY_SAMPLE_PERIOD = 8191,
 	LOAD_LATENCY_THRESHOLD = 64,
+	RETIRED_STORES_SAMPLE_PERIOD = 65535,
+	LOAD_L3_MISS_SAMPLE_PERIOD = 8191,
 	SDS_WIDTH_AUTO = 8192,
 	SDS_DEPTH = 4,
 	ASYNCHRONOUS_ARCHITECTURE = true,
 	DECAY_SKETCH = true,
-	THROTTLE_PULSE_WIDTH_MS = 1000,
+	THROTTLE_PULSE_WIDTH_MS = 0,
 	THROTTLE_PULSE_PERIOD_MS = 5000,
+	SPLI_PERIOD_MS = 500,
 };
 enum event_config {
 	MEM_TRANS_RETIRED_LOAD_LATENCY = 0x01cd,
@@ -36,7 +39,7 @@ extern ulong load_latency_threshold;
 extern ulong retired_stores_sample_period;
 extern ulong throttle_pulse_width_ms;
 extern ulong throttle_pulse_period_ms;
-extern bool decay_sketch;
+extern ulong split_period_ms;
 
 DECLARE_STATIC_KEY_TRUE(use_asynchronous_architecture);
 

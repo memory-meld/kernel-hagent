@@ -3,7 +3,7 @@
 #include "hagent.h"
 #include "module.h"
 
-ulong load_latency_sample_period = SAMPLE_PERIOD;
+ulong load_latency_sample_period = LOAD_LATENCY_SAMPLE_PERIOD;
 module_param_named(load_latency_sample_period, load_latency_sample_period,
 		   ulong, 0644);
 MODULE_PARM_DESC(load_latency_sample_period,
@@ -14,16 +14,16 @@ module_param_named(load_latency_threshold, load_latency_threshold, ulong, 0644);
 MODULE_PARM_DESC(load_latency_threshold,
 		 "Load latency threshold for ldlat event, defaults to 64");
 
-ulong retired_stores_sample_period = SAMPLE_PERIOD;
+ulong retired_stores_sample_period = RETIRED_STORES_SAMPLE_PERIOD;
 module_param_named(retired_stores_sample_period, retired_stores_sample_period,
 		   ulong, 0644);
 MODULE_PARM_DESC(retired_stores_sample_period,
 		 "Sample period for retired stores event, defaults to 17");
 
-ulong local_dram_miss_sample_period = SAMPLE_PERIOD;
-module_param_named(local_dram_miss_sample_period, local_dram_miss_sample_period,
+ulong load_l3_miss_sample_period = LOAD_L3_MISS_SAMPLE_PERIOD;
+module_param_named(load_l3_miss_sample_period, load_l3_miss_sample_period,
 		   ulong, 0644);
-MODULE_PARM_DESC(local_dram_miss_sample_period,
+MODULE_PARM_DESC(load_l3_miss_sample_period,
 		 "Sample period for local DRAM L3 miss event, defaults to 17");
 
 ulong streaming_decaying_sketch_width = SDS_WIDTH_AUTO;
@@ -50,15 +50,11 @@ module_param_named(throttle_pulse_period_ms, throttle_pulse_period_ms, ulong,
 MODULE_PARM_DESC(throttle_pulse_period_ms,
 		 "Throttle pulse period in ms, defaults to 5000");
 
-bool asynchronous_architecture = ASYNCHRONOUS_ARCHITECTURE;
-module_param_named(asynchronous_architecture, asynchronous_architecture, bool,
-		   0644);
-MODULE_PARM_DESC(asynchronous_architecture,
-		 "Whether to use asynchronous architecture, defaults to true");
+ulong split_period_ms = SPLI_PERIOD_MS;
+module_param_named(split_period_ms, split_period_ms, ulong, 0644);
+MODULE_PARM_DESC(split_period_ms, "Split period in ms, defaults to 200");
 
-bool decay_sketch = DECAY_SKETCH;
-module_param_named(decay_sketch, decay_sketch, bool, 0644);
-MODULE_PARM_DESC(decay_sketch, "Whether to decay sketch, defaults to true");
+
 
 DEFINE_STATIC_KEY_TRUE(should_decay_sketch);
 
@@ -92,7 +88,7 @@ struct perf_event_attr event_attrs[MAX_EVENTS] = {
 		.config = MEM_LOAD_L3_MISS_RETIRED_LOCAL_DRAM,
 		.sample_type = PERF_SAMPLE_TID | PERF_SAMPLE_TIME | PERF_SAMPLE_ADDR |
 			       PERF_SAMPLE_WEIGHT | PERF_SAMPLE_PHYS_ADDR,
-		.sample_period = SAMPLE_PERIOD,
+		.sample_period = LOAD_L3_MISS_SAMPLE_PERIOD,
 		.inherit = 1,
 		.precise_ip = 3,
 		// .disabled = 1,
@@ -105,7 +101,7 @@ struct perf_event_attr event_attrs[MAX_EVENTS] = {
 		.config = MEM_INST_RETIRED_ALL_STORES,
 		.sample_type = PERF_SAMPLE_TID | PERF_SAMPLE_TIME | PERF_SAMPLE_ADDR |
 			       PERF_SAMPLE_WEIGHT | PERF_SAMPLE_PHYS_ADDR,
-		.sample_period = SAMPLE_PERIOD,
+		.sample_period = RETIRED_STORES_SAMPLE_PERIOD ,
 		.inherit = 1,
 		.precise_ip = 3,
 		// .disabled = 1,
@@ -119,10 +115,10 @@ static inline void event_attrs_update_param(void)
 	// event_attrs[EVENT_LOAD].config1 = load_latency_threshold;
 	// event_attrs[EVENT_LOAD].sample_period = load_latency_sample_period;
 	// event_attrs[EVENT_LOAD].config1 = load_latency_threshold;
-	event_attrs[EVENT_LOAD].sample_period = local_dram_miss_sample_period;
+	event_attrs[EVENT_LOAD].sample_period = load_l3_miss_sample_period;
 	event_attrs[EVENT_STORE].sample_period = retired_stores_sample_period;
 	pr_info("%s: local_dram_miss_sample_period=%lu retired_stores_sample_period=%lu load_latency_sample_period=%lu load_latency_threshold=%lu\n",
-		__func__, local_dram_miss_sample_period,
+		__func__, load_l3_miss_sample_period,
 		retired_stores_sample_period, load_latency_sample_period,
 		load_latency_threshold);
 }
