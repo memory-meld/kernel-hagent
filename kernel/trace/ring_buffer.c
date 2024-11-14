@@ -970,65 +970,123 @@ int ring_buffer_wait(struct trace_buffer *buffer, int cpu, int full,
 }
 EXPORT_SYMBOL_GPL(ring_buffer_wait);
 
-#define select_event(wqh0, cond0, wqh1, cond1)                   \
-	({                                                       \
-		__label__ out;                                   \
-		long __ret = -EAGAIN;                            \
-		might_sleep();                                   \
-		if (cond0) {                                     \
-			__ret = 0;                               \
-			goto out;                                \
-		}                                                \
-		if (cond1) {                                     \
-			__ret = 1;                               \
-			goto out;                                \
-		}                                                \
-		DEFINE_WAIT_FUNC(__wqe0, default_wake_function); \
-		DEFINE_WAIT_FUNC(__wqe1, default_wake_function); \
-		add_wait_queue(wqh0, &__wqe0);                   \
-		add_wait_queue(wqh1, &__wqe1);                   \
-		for (;;) {                                       \
-			set_current_state(TASK_INTERRUPTIBLE);   \
-			if (cond0) {                             \
-				__ret = 0;                       \
-				break;                           \
-			}                                        \
-			if (cond1) {                             \
-				__ret = 1;                       \
-				break;                           \
-			}                                        \
-			schedule();                              \
-			if (signal_pending(current)) {           \
-				__ret = -ERESTARTSYS;            \
-				break;                           \
-			}                                        \
-		}                                                \
-		remove_wait_queue(wqh1, &__wqe1);                \
-		remove_wait_queue(wqh0, &__wqe0);                \
-		__set_current_state(TASK_RUNNING);               \
-out:                                                             \
-		__ret;                                           \
+struct __wqe {
+	struct wait_queue_entry entry;
+	struct wait_queue_head *head;
+};
+static inline void __wqe_dtor(struct __wqe *wqe)
+{
+	remove_wait_queue(wqe->head, &wqe->entry);
+}
+#define __make_wqe(name, wqh)                                    \
+	struct __wqe __cleanup(__wqe_dtor) name = {              \
+		.head = ({                                       \
+			init_wait(&name.entry);                  \
+			name.entry.func = default_wake_function; \
+			add_wait_queue(wqh, &name.entry);        \
+			wqh;                                     \
+		}),                                              \
+	}
+#define __check(cond, ret)           \
+	({                           \
+		if (cond) {          \
+			__ret = ret; \
+			break;       \
+		}                    \
+	})
+#define select2(wqh0, cond0, wqh1, cond1)                                      \
+	({                                                                     \
+		long __ret = -EAGAIN;                                          \
+		might_sleep();                                                 \
+		do {                                                           \
+			__check(cond0, 0);                                     \
+			__check(cond1, 1);                                     \
+			{                                                      \
+				__make_wqe(__wqe0, wqh0);                      \
+				__make_wqe(__wqe1, wqh1);                      \
+				for (;;) {                                     \
+					set_current_state(TASK_INTERRUPTIBLE); \
+					__check(cond0, 0);                     \
+					__check(cond1, 1);                     \
+					schedule();                            \
+					__check(signal_pending(current),       \
+						-ERESTARTSYS);                 \
+				}                                              \
+			}                                                      \
+			__set_current_state(TASK_RUNNING);                     \
+		} while (false);                                               \
+		__ret;                                                         \
 	})
 
-int ring_buffer_wait_select(struct trace_buffer *buffer0,
-			    ring_buffer_cond_fn cond0, void *data0,
-			    struct trace_buffer *buffer1,
-			    ring_buffer_cond_fn cond1, void *data1)
+#define select3(wqh0, cond0, wqh1, cond1, wqh2, cond2)                         \
+	({                                                                     \
+		long __ret = -EAGAIN;                                          \
+		might_sleep();                                                 \
+		do {                                                           \
+			__check(cond0, 0);                                     \
+			__check(cond1, 1);                                     \
+			__check(cond2, 2);                                     \
+			{                                                      \
+				__make_wqe(__wqe0, wqh0);                      \
+				__make_wqe(__wqe1, wqh1);                      \
+				__make_wqe(__wqe2, wqh2);                      \
+				for (;;) {                                     \
+					set_current_state(TASK_INTERRUPTIBLE); \
+					__check(cond0, 0);                     \
+					__check(cond1, 1);                     \
+					__check(cond2, 2);                     \
+					schedule();                            \
+					__check(signal_pending(current),       \
+						-ERESTARTSYS);                 \
+				}                                              \
+			}                                                      \
+			__set_current_state(TASK_RUNNING);                     \
+		} while (false);                                               \
+		__ret;                                                         \
+	})
+
+int ring_buffer_select2(struct trace_buffer *b0, ring_buffer_cond_fn c0,
+			void *d0, struct trace_buffer *b1,
+			ring_buffer_cond_fn c1, void *d1)
 {
-	struct rb_irq_work *rbwork0 = &buffer0->irq_work,
-			   *rbwork1 = &buffer1->irq_work;
+	struct rb_irq_work *rbwork0 = &b0->irq_work, *rbwork1 = &b1->irq_work;
 	struct wait_queue_head *waitq0 = &rbwork0->waiters,
 			       *waitq1 = &rbwork1->waiters;
-	BUG_ON(!cond0 || !cond1);
-	return select_event(waitq0,
-			    rb_wait_cond(rbwork0, buffer0, RING_BUFFER_ALL_CPUS,
-					 0, cond0, data0),
-			    waitq1,
-			    rb_wait_cond(rbwork1, buffer1, RING_BUFFER_ALL_CPUS,
-					 0, cond1, data1));
+	BUG_ON(!c0 || !c1);
+	return select2(
+		waitq0,
+		rb_wait_cond(rbwork0, b0, RING_BUFFER_ALL_CPUS, 0, c0, d0),
+		waitq1,
+		rb_wait_cond(rbwork1, b1, RING_BUFFER_ALL_CPUS, 0, c1, d1));
 };
-EXPORT_SYMBOL_GPL(ring_buffer_wait_select);
-#undef select_event
+EXPORT_SYMBOL_GPL(ring_buffer_select2);
+
+int ring_buffer_select3(struct trace_buffer *b0, ring_buffer_cond_fn c0,
+			void *d0, struct trace_buffer *b1,
+			ring_buffer_cond_fn c1, void *d1,
+			struct trace_buffer *b2, ring_buffer_cond_fn c2,
+			void *d2)
+{
+	struct rb_irq_work *rbwork0 = &b0->irq_work, *rbwork1 = &b1->irq_work,
+			   *rbwork2 = &b2->irq_work;
+	struct wait_queue_head *waitq0 = &rbwork0->waiters,
+			       *waitq1 = &rbwork1->waiters,
+			       *waitq2 = &rbwork2->waiters;
+	BUG_ON(!c0 || !c1 || !c2);
+	return select3(
+		waitq0,
+		rb_wait_cond(rbwork0, b0, RING_BUFFER_ALL_CPUS, 0, c0, d0),
+		waitq1,
+		rb_wait_cond(rbwork1, b1, RING_BUFFER_ALL_CPUS, 0, c1, d1),
+		waitq2,
+		rb_wait_cond(rbwork2, b2, RING_BUFFER_ALL_CPUS, 0, c2, d2));
+};
+EXPORT_SYMBOL_GPL(ring_buffer_select3);
+
+#undef select3
+#undef select2
+#undef __check
+#undef __make_wqe
 
 /**
  * ring_buffer_poll_wait - poll on buffer input

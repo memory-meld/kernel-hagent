@@ -57,14 +57,35 @@ noinline static inline int mpsc_wait(mpsc_t chan)
 	return ring_buffer_wait(chan, RING_BUFFER_ALL_CPUS, 0, mpsc_wait_always,
 				NULL);
 }
-extern int ring_buffer_wait_select(struct trace_buffer *buffer0,
-				   ring_buffer_cond_fn cond0, void *data0,
-				   struct trace_buffer *buffer1,
-				   ring_buffer_cond_fn cond1, void *data1);
-noinline static inline int mpsc_select(mpsc_t ch0, mpsc_t ch1)
+extern int ring_buffer_select2(struct trace_buffer *b0, ring_buffer_cond_fn c0,
+			       void *d0, struct trace_buffer *b1,
+			       ring_buffer_cond_fn c1, void *d1);
+extern int ring_buffer_select3(struct trace_buffer *b0, ring_buffer_cond_fn c0,
+			       void *d0, struct trace_buffer *b1,
+			       ring_buffer_cond_fn c1, void *d1,
+			       struct trace_buffer *b2, ring_buffer_cond_fn c2,
+			       void *d2);
+noinline static inline int mpsc_select2(mpsc_t ch0, mpsc_t ch1)
 {
-	return ring_buffer_wait_select(ch0, mpsc_wait_always, NULL, ch1,
-				       mpsc_wait_always, NULL);
+	return ring_buffer_select2(ch0, mpsc_wait_always, NULL, ch1,
+				   mpsc_wait_always, NULL);
 }
+noinline static inline int mpsc_select3(mpsc_t ch0, mpsc_t ch1, mpsc_t ch2)
+{
+	return ring_buffer_select3(ch0, mpsc_wait_always, NULL, ch1,
+				   mpsc_wait_always, NULL, ch2,
+				   mpsc_wait_always, NULL);
+}
+
+// CAREFUL: This macro does not support break
+#define mpsc_for_each(ch, elem)                                        \
+	for (int __cpu, __done = 0; !__done; __done = true)            \
+		for_each_online_cpu(__cpu)                             \
+			for (ssize_t __fail = 0; __fail < MPSC_RETRY;) \
+				if (sizeof(elem) !=                    \
+				    mpsc_recv_cpu(ch, __cpu, &elem,    \
+						  sizeof(elem))) {     \
+					++__fail;                      \
+				} else
 
 #endif // !HAGENT_MPSC_H
