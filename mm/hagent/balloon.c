@@ -741,10 +741,49 @@ static int validate(struct virtio_device *vdev)
 	return 0;
 }
 
+struct virtio_balloon *__global_instance = NULL;
+ulong node_avail_pages(int nid)
+{
+	// See: vb_inner_page_alloc
+	struct virtio_balloon *vb = __global_instance;
+	struct virtio_balloon_inner *inner = NULL;
+	if (!vb) {
+		return -ENXIO;
+	} else if (nid == first_node(node_states[N_MEMORY])) {
+		inner = &vb->inner[I_NORMAL];
+	} else if (nid == last_node(node_states[N_MEMORY])) {
+		inner = &vb->inner[I_HETERO];
+	} else {
+		return -EINVAL;
+	}
+	return node_present_pages(nid) - inner->len;
+}
+EXPORT_SYMBOL_GPL(node_avail_pages);
+
+ulong node_balloon_pages(int nid)
+{
+	struct virtio_balloon *vb = __global_instance;
+	struct virtio_balloon_inner *inner = NULL;
+	if (!vb) {
+		return -ENXIO;
+	} else if (nid == first_node(node_states[N_MEMORY])) {
+		inner = &vb->inner[I_NORMAL];
+	} else if (nid == last_node(node_states[N_MEMORY])) {
+		inner = &vb->inner[I_HETERO];
+	} else {
+		return -EINVAL;
+	}
+	return inner->len;
+}
+EXPORT_SYMBOL_GPL(node_balloon_pages);
+
 static int probe(struct virtio_device *vdev)
 {
 	if (!vdev) {
 		return -EINVAL;
+	}
+	if (__global_instance) {
+		return -EBUSY;
 	}
 	struct virtio_balloon *vb = kvzalloc(sizeof(*vb), GFP_KERNEL);
 	if (!vb) {
@@ -752,6 +791,7 @@ static int probe(struct virtio_device *vdev)
 	}
 
 	TRY(vb_init(vb, vdev));
+	__global_instance = vb;
 	return 0;
 }
 
@@ -765,6 +805,7 @@ static void remove(struct virtio_device *vdev)
 {
 	struct virtio_balloon *vb = vdev->priv;
 
+	__global_instance = NULL;
 	vb_drop(vb);
 	kvfree(vb);
 }
