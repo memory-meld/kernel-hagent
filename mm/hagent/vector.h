@@ -45,7 +45,6 @@ noinline void vector_clear(struct vector *v);
 noinline void *vector_front(struct vector *v);
 noinline void *vector_back(struct vector *v);
 
-noinline void swap_data(void *a, void *b, void *tmp, size_t size);
 enum { VECTOR_SWAP_STACK_SIZE = 256 };
 noinline void vector_swap_stack(struct vector *v, size_t i, size_t j);
 noinline void vector_swap(struct vector *v, size_t i, size_t j);

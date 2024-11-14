@@ -85,7 +85,7 @@ void *vector_back(struct vector *v)
 	return v->data + (v->len - 1) * v->elem_size;
 }
 
-void swap_data(void *a, void *b, void *tmp, size_t size)
+static void swap_data(void *a, void *b, void *tmp, size_t size)
 {
 	memcpy(tmp, a, size);
 	memcpy(a, b, size);
