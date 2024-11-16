@@ -342,7 +342,7 @@ noinline static int policy_send_exch_reqs(struct policy_worker *data,
 	struct mrange **mrs = data->mrs;
 	ulong (*fn)(int) = data->node_avail_pages;
 	mpsc_t excg_req = data->excg_req;
-	if (rt->len < RTREE_MIN_SIZE)
+	if (rt->min_range > RTREE_EXCH_THRESH)
 		return -EAGAIN;
 	struct list_head *promo = TRY(
 				 kmem_cache_alloc(list_head_cache, GFP_KERNEL)),

@@ -13,7 +13,7 @@ enum {
 	RTREE_SIGNIFICANCE_FACTOR = 2,
 	// TODO: make this value configurable and adaptive
 	RTREE_SPLIT_THRESH = 500,
-	RTREE_MIN_SIZE = 30,
+	RTREE_EXCH_THRESH = RTREE_GRANULARITY,
 	RTREE_MAX_SIZE = 2048,
 	RTREE_COOL_AGE = 3,
 };
@@ -76,7 +76,7 @@ struct range_tree {
 	// Assume a full segment with sparse storage to simplify implementation
 	// We index into the segment tree using the index off the start address
 	// with a granularity of SEG_TREE_GRANULARITY
-	ulong len, age;
+	ulong len, age, min_range;
 	// Use the maple_tree as a sparse array
 	struct maple_tree tree;
 };
@@ -89,6 +89,7 @@ noinline static inline int rt_init(struct range_tree *self, ulong start,
 	end = round_up(end, RTREE_GRANULARITY);
 	self->len = 1;
 	self->age = 0;
+	self->min_range = end - start;
 	mt_init(&self->tree);
 	UNWRAP(mtree_insert_range(&self->tree, start, end - 1,
 				  UNWRAP(mrange_new(start, end, self->age, 0)),
@@ -191,10 +192,12 @@ noinline static inline int rt_split(struct range_tree *self)
 			BUG_ON(edges[i] <= edges[i - 1]);
 		}
 		struct mrange *ins = NULL;
+		ulong min_range = ULONG_MAX;
 		for (ulong i = 0, nr_access = curr->nr_access / RTREE_SPLIT_N;
 		     i < RTREE_SPLIT_N; ++i) {
 			pr_info("%s: inserting range [%#lx, %#lx)\n", __func__,
 				edges[i], edges[i + 1]);
+			min_range = min(min_range, edges[i + 1] - edges[i]);
 			UNWRAP(mtree_insert_range(
 				&self->tree, edges[i], edges[i + 1] - 1,
 				ins = UNWRAP(mrange_new(edges[i], edges[i + 1],
@@ -203,6 +206,7 @@ noinline static inline int rt_split(struct range_tree *self)
 			mrange_show(ins);
 		}
 		mrange_drop(curr);
+		self->min_range = min(self->min_range, min_range);
 		// Prevent stuck at splitting the same range
 		curr = ins;
 		self->len += RTREE_SPLIT_N - 1;
