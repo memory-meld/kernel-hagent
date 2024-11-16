@@ -134,6 +134,25 @@ static const struct virtio_device_id id_table[] = {
 	{ 0 },
 };
 
+struct virtio_balloon *__global_instance = NULL;
+ulong node_avail_pages(int nid) {
+	struct virtio_balloon *vb = __global_instance;
+	if (!vb)
+		return node_present_pages(nid);
+
+	struct balloon_dev_info *vb_dev_info = &vb->vb_dev_info;
+	struct page *page;
+	unsigned long flags;
+	size_t n_pages = 0;
+	spin_lock_irqsave(&vb_dev_info->pages_lock, flags);
+	list_for_each_entry(page, &vb_dev_info->pages, lru)
+		if (page_to_nid(page) == nid)
+			n_pages += VIRTIO_BALLOON_PAGES_PER_PAGE;
+	spin_unlock_irqrestore(&vb_dev_info->pages_lock, flags);
+	return node_present_pages(nid) - n_pages;
+}
+EXPORT_SYMBOL_GPL(node_avail_pages);
+
 static u32 page_to_balloon_pfn(struct page *page)
 {
 	unsigned long pfn = page_to_pfn(page);
@@ -1059,6 +1078,7 @@ static int virtballoon_probe(struct virtio_device *vdev)
 
 	if (towards_target(vb))
 		virtballoon_changed(vdev);
+	__global_instance = vb;
 	return 0;
 
 out_unregister_oom:
@@ -1074,6 +1094,7 @@ out_del_vqs:
 	vdev->config->del_vqs(vdev);
 out_free_vb:
 	kfree(vb);
+	__global_instance = NULL;
 out:
 	return err;
 }
@@ -1098,6 +1119,7 @@ static void remove_common(struct virtio_balloon *vb)
 static void virtballoon_remove(struct virtio_device *vdev)
 {
 	struct virtio_balloon *vb = vdev->priv;
+	__global_instance = NULL;
 
 	if (virtio_has_feature(vb->vdev, VIRTIO_BALLOON_F_REPORTING))
 		page_reporting_unregister(&vb->pr_dev_info);
