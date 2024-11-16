@@ -451,6 +451,12 @@ static void kmalloc_cleanup(const void *p)
 	kfree(*(void **)p);
 }
 
+ulong __node_present_pages(int nid)
+{
+	return node_present_pages(nid);
+}
+EXPORT_SYMBOL_GPL(__node_present_pages);
+
 noinline static int worker_policy(struct target *self)
 {
 	// Shared data
@@ -477,11 +483,12 @@ noinline static int worker_policy(struct target *self)
 		TRY(kcalloc(RTREE_MAX_SIZE, sizeof(*mrs), GFP_KERNEL));
 	BUG_ON(!mrs);
 
+	extern ulong __node_avail_pages(int nid);
 	extern ulong node_avail_pages(int nid);
-	ulong (*fn)(int) = symbol_get(node_avail_pages);
+	ulong (*fn)(int) = symbol_get(__node_avail_pages)	?:
+				   symbol_get(node_avail_pages) ?:
+				   symbol_get(__node_present_pages);
 	BUG_ON(!fn);
-	pr_info("%s: symbol_get(node_avail_pages)=%pe\n", __func__,
-		ERR_PTR((long)fn));
 
 	struct policy_worker data = {
 		.pid = self->victim->tgid,
@@ -556,7 +563,7 @@ noinline static int worker_policy(struct target *self)
 		}
 	}
 
-	symbol_put(node_avail_pages);
+	symbol_put_addr(fn);
 	worker_farewell(current);
 	return 0;
 }
@@ -695,10 +702,6 @@ noinline static int worker_migration(struct target *self)
 	HashMapU64U64 __cleanup(HashMapU64U64_destroy)
 		bset = HashMapU64U64_new(MIGRATION_BSET_BUCKET);
 	extern ulong node_balloon_pages(int nid);
-	ulong (*fn)(int) = symbol_get(node_balloon_pages);
-	BUG_ON(!fn);
-	pr_info("%s: symbol_get(node_balloon_pages)=%pe\n", __func__,
-		ERR_PTR((long)fn));
 
 	u64 excg_count = 0, report_period = 500, next_report = report_period;
 	// reporting is rate limited to every 1000ms

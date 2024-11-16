@@ -742,23 +742,23 @@ static int validate(struct virtio_device *vdev)
 }
 
 struct virtio_balloon *__global_instance = NULL;
-ulong node_avail_pages(int nid)
+ulong __node_avail_pages(int nid)
 {
 	// See: vb_inner_page_alloc
 	struct virtio_balloon *vb = __global_instance;
 	struct virtio_balloon_inner *inner = NULL;
 	if (!vb) {
-		return -ENXIO;
+		return node_present_pages(nid);
 	} else if (nid == first_node(node_states[N_MEMORY])) {
 		inner = &vb->inner[I_NORMAL];
 	} else if (nid == last_node(node_states[N_MEMORY])) {
 		inner = &vb->inner[I_HETERO];
 	} else {
-		return -EINVAL;
+		return node_present_pages(nid);
 	}
 	return node_present_pages(nid) - inner->len;
 }
-EXPORT_SYMBOL_GPL(node_avail_pages);
+EXPORT_SYMBOL_GPL(__node_avail_pages);
 
 ulong node_balloon_pages(int nid)
 {
