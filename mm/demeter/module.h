@@ -1,5 +1,5 @@
-#ifndef HAGENT_PLACEMENT_MODULE_H
-#define HAGENT_PLACEMENT_MODULE_H
+#ifndef DEMETER_PLACEMENT_MODULE_H
+#define DEMETER_PLACEMENT_MODULE_H
 
 #include <linux/perf_event.h>
 #include <linux/prime_numbers.h>
@@ -57,4 +57,4 @@ extern struct kmem_cache *list_head_cache;
 
 DECLARE_STATIC_KEY_TRUE(use_asynchronous_architecture);
 
-#endif // !HAGENT_PLACEMENT_MODULE_H
+#endif // !DEMETER_PLACEMENT_MODULE_H

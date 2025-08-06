@@ -1,5 +1,5 @@
-#ifndef HAGENT_PLACEMENT_SDS_H
-#define HAGENT_PLACEMENT_SDS_H
+#ifndef DEMETER_PLACEMENT_SDS_H
+#define DEMETER_PLACEMENT_SDS_H
 
 #include "vector.h"
 
@@ -30,4 +30,4 @@ extern ulong streaming_decaying_sketch_width;
 extern ulong streaming_decaying_sketch_depth;
 DECLARE_STATIC_KEY_TRUE(should_decay_sketch);
 
-#endif // !HAGENT_PLACEMENT_SDS_H
+#endif // !DEMETER_PLACEMENT_SDS_H

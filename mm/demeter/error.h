@@ -1,5 +1,5 @@
-#ifndef HAGENT_PLACEMENT_ERROR_H
-#define HAGENT_PLACEMENT_ERROR_H
+#ifndef DEMETER_PLACEMENT_ERROR_H
+#define DEMETER_PLACEMENT_ERROR_H
 
 #include <linux/err.h>
 #include <linux/errno.h>
@@ -79,4 +79,4 @@ inline const char *ecname(int err)
 		__val;                                                               \
 	})
 
-#endif // HAGENT_PLACEMENT_ERROR_H
+#endif // DEMETER_PLACEMENT_ERROR_H

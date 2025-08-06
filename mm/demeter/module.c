@@ -1,6 +1,6 @@
 #include <linux/module.h>
 
-#include "hagent.h"
+#include "demeter.h"
 #include "module.h"
 
 ulong load_latency_sample_period = LOAD_LATENCY_SAMPLE_PERIOD;
@@ -168,12 +168,12 @@ static __init int init(void)
 	}
 	sds_update_param();
 	event_attrs_update_param();
-	return hagent_sysfs_init();
+	return demeter_sysfs_init();
 }
 
 static __exit void exit(void)
 {
-	hagent_sysfs_exit();
+	demeter_sysfs_exit();
 	kmem_cache_destroy(list_head_cache);
 }
 

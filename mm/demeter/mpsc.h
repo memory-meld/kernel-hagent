@@ -1,5 +1,5 @@
-#ifndef HAGENT_MPSC_H
-#define HAGENT_MPSC_H
+#ifndef DEMETER_MPSC_H
+#define DEMETER_MPSC_H
 #include <linux/ring_buffer.h>
 
 typedef struct trace_buffer *mpsc_t;
@@ -88,4 +88,4 @@ noinline static inline int mpsc_select3(mpsc_t ch0, mpsc_t ch1, mpsc_t ch2)
 					++__fail;                      \
 				} else
 
-#endif // !HAGENT_MPSC_H
+#endif // !DEMETER_MPSC_H

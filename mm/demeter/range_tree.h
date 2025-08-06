@@ -1,5 +1,5 @@
-#ifndef HAGENT_PLACEMENT_RANGE_TREE_H
-#define HAGENT_PLACEMENT_RANGE_TREE_H
+#ifndef DEMETER_PLACEMENT_RANGE_TREE_H
+#define DEMETER_PLACEMENT_RANGE_TREE_H
 
 #include <linux/mm.h>
 #include <linux/maple_tree.h>
@@ -332,4 +332,4 @@ rt_isolate(struct mm_struct *locked_mm, struct mrange *r, int nid, ulong need,
 #undef folio_for_each
 #undef vma_for_each
 
-#endif // HAGENT_PLACEMENT_RANGE_TREE_H
+#endif // DEMETER_PLACEMENT_RANGE_TREE_H

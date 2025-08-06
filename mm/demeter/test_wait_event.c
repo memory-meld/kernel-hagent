@@ -176,17 +176,17 @@ static void test_wait_events(struct kunit *test)
 		kthread_stop(t[i]);
 }
 
-static struct kunit_case hagent_test_cases[] = {
+static struct kunit_case demeter_test_cases[] = {
 	KUNIT_CASE_SLOW(test_wait_two_events),
 	KUNIT_CASE_SLOW(test_wait_events),
 	{},
 };
 
-static struct kunit_suite hagent_test_suite = {
-	.name = "hagent",
-	.test_cases = hagent_test_cases,
+static struct kunit_suite demeter_test_suite = {
+	.name = "demeter",
+	.test_cases = demeter_test_cases,
 };
-kunit_test_suite(hagent_test_suite);
+kunit_test_suite(demeter_test_suite);
 
 // static int __init init(void) { return 0; }
 // static void __exit exit(void) { }

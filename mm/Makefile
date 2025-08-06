@@ -142,4 +142,4 @@ obj-$(CONFIG_EXECMEM) += execmem.o
 
 obj-$(CONFIG_EXCHANGE) += exchange.o
 obj-$(CONFIG_EXCHANGE_TEST) += exchange_test.o
-obj-$(CONFIG_HAGENT) += hagent/
+obj-$(CONFIG_DEMETER) += demeter/

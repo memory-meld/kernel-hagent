@@ -14,7 +14,7 @@
 #include <../internal.h>
 
 #include "error.h"
-#include "hagent.h"
+#include "demeter.h"
 #include "pebs.h"
 #include "module.h"
 #include "mpsc.h"
