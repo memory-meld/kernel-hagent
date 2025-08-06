@@ -135,6 +135,32 @@ void all_vm_events(unsigned long *ret)
 }
 EXPORT_SYMBOL_GPL(all_vm_events);
 
+void clear_all_vm_events(void)
+{
+	int cpu;
+
+	for_each_online_cpu(cpu) {
+		struct vm_event_state *this = &per_cpu(vm_event_states, cpu);
+		int sz = NR_VM_EVENT_ITEMS * sizeof(unsigned long);
+
+		memset(this->event, 0, sz);
+	}
+}
+EXPORT_SYMBOL_GPL(clear_all_vm_events);
+
+/*
+ * This is the node to reset all vm events in /proc/vmstat
+ * via /proc/sys/vm/clear_all_vm_events
+ */
+int sysctl_clearvmevents_handler(struct ctl_table *table, int write,
+	void __user *buffer, size_t *length, loff_t *ppos)
+{
+	if (write)
+		clear_all_vm_events();
+
+	return 0;
+}
+
 /*
  * Fold the foreign cpu events into our own.
  *

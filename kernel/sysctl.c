@@ -135,6 +135,8 @@ static enum sysctl_writes_mode sysctl_writes_strict = SYSCTL_WRITES_STRICT;
 int sysctl_legacy_va_layout;
 #endif
 
+static int sysctl_clear_vm_events;
+
 #endif /* CONFIG_SYSCTL */
 
 /*
@@ -2239,6 +2241,13 @@ static struct ctl_table vm_table[] = {
 		.extra2		= (void *)&mmap_rnd_compat_bits_max,
 	},
 #endif
+	{
+		.procname	= "clear_all_vm_events",
+		.data		= &sysctl_clear_vm_events,
+		.maxlen		= sizeof(int),
+		.mode		= 0200,
+		.proc_handler	= sysctl_clearvmevents_handler,
+	},
 };
 
 int __init sysctl_init_bases(void)

@@ -11,6 +11,8 @@
 #include <linux/mmdebug.h>
 
 extern int sysctl_stat_interval;
+extern int sysctl_clearvmevents_handler(struct ctl_table *table, int write,
+	void __user *buffer, size_t *length, loff_t *ppos);
 
 #ifdef CONFIG_NUMA
 #define ENABLE_NUMA_STAT   1
@@ -83,6 +85,8 @@ static inline void count_vm_events(enum vm_event_item item, long delta)
 
 extern void all_vm_events(unsigned long *);
 
+extern void clear_all_vm_events(void);
+
 extern void vm_events_fold_cpu(int cpu);
 
 #else
@@ -101,6 +105,9 @@ static inline void __count_vm_events(enum vm_event_item item, long delta)
 {
 }
 static inline void all_vm_events(unsigned long *ret)
+{
+}
+static inline void clear_all_vm_events(void)
 {
 }
 static inline void vm_events_fold_cpu(int cpu)
