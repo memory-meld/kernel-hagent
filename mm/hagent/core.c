@@ -56,6 +56,7 @@ enum target_param {
 	MPSC_MAX_SIZE_BYTE = 1 << 20,
 	MPSC_MAX_BATCH = 16384,
 	IHEAP_MIN_SIZE = 512,
+	RMT_INITIAL_SIZE_FACTOR = 2,
 	RMT_GRANULARITY = 2ul << 20,
 	RMT_MIN_SIZE = 3,
 	RMT_MAX_SIZE = 256,
@@ -193,6 +194,7 @@ noinline static void target_events_overflow(struct perf_event *event,
 }
 static void target_events_enable(struct target *self, bool enable)
 {
+	pr_info("%s: enable=%d\n", __func__, enable);
 	void intel_pmu_drain_pebs_buffer(void);
 	for (int i = 0; i < MAX_EVENTS; i++) {
 		if (self->events[i]) {
@@ -305,12 +307,14 @@ noinline static int policy_handle_sample_one(struct policy_worker *data,
 	struct range_tree *rt = data->rt;
 	// ulong *nr_access = data->nr_access;
 	ulong vaddr = s->addr;
-	if (vaddr < mm->start_brk || vaddr >= mm->mmap_base) {
-		// pr_err_ratelimited(
-		// 	"%s: vaddr=%#lx not in [start_brk=%#lx, mmap_base=%#lx)\n",
-		// 	__func__, vaddr, mm->start_brk, mm->mmap_base);
-		return -ECBADSAMPLE;
-	}
+	if (!vaddr)
+		return PEBS_NR_DISCARDED_NULL - PEBS_NR_DISCARDED;
+	if (s->pid != data->pid)
+		return PEBS_NR_DISCARDED_PID - PEBS_NR_DISCARDED;
+	if (!(mm->mmap_legacy_base <= vaddr && vaddr < mm->mmap_base))
+		return PEBS_NR_DISCARDED_IGNORE - PEBS_NR_DISCARDED;
+	if (mm->start_code <= vaddr && vaddr < max(mm->end_data, mm->start_brk))
+		return PEBS_NR_DISCARDED_IGNORE - PEBS_NR_DISCARDED;
 	TRY(rt_count(rt, vaddr));
 	return 0;
 }
@@ -318,22 +322,24 @@ noinline static int policy_handle_samples(struct policy_worker *data,
 					  struct mm_struct *mm)
 {
 	mpsc_t samplech = data->samplech;
-	int received = 0, discarded = 0;
+	long rcv = 0,
+	     dis[PEBS_NR_DISCARDED_IGNORE - PEBS_NR_DISCARDED + 1] = {};
 	struct perf_sample s = {};
 	mpsc_for_each(samplech, s) {
-		int err = policy_handle_sample_one(data, mm, &s);
-		if (err < 0) {
-			++discarded;
-		} else {
-			++received;
-		}
-		if (received + discarded > MPSC_MAX_BATCH)
+		long err = policy_handle_sample_one(data, mm, &s);
+		if (!err)
+			++rcv;
+		else
+			++dis[max(err, 0)];
+		if (rcv + dis[0] > MPSC_MAX_BATCH)
 			goto out;
 	}
 out:
-	count_vm_events(PEBS_NR_SAMPLED, received);
-	count_vm_events(PEBS_NR_DISCARDED, discarded);
-	return received;
+	count_vm_events(PEBS_NR_SAMPLED, rcv);
+	for (int i = 0; i < ARRAY_SIZE(dis); i++)
+		if (dis[i])
+			count_vm_events(PEBS_NR_DISCARDED + i, dis[i]);
+	return rcv;
 }
 noinline static int policy_send_exch_reqs(struct policy_worker *data,
 					  struct mm_struct *mm)
@@ -342,7 +348,7 @@ noinline static int policy_send_exch_reqs(struct policy_worker *data,
 	struct mrange **mrs = data->mrs;
 	ulong (*fn)(int) = data->node_avail_pages;
 	mpsc_t excg_req = data->excg_req;
-	if (rt->min_range > RTREE_EXCH_THRESH)
+	if (rt->min_range > rtree_exch_thresh)
 		return -EAGAIN;
 	struct list_head *promo = TRY(
 				 kmem_cache_alloc(list_head_cache, GFP_KERNEL)),
@@ -356,35 +362,50 @@ noinline static int policy_send_exch_reqs(struct policy_worker *data,
 	// ranges [0, s) should be placed in smem
 	// ranges [f, olen) should be placed in fmem
 	ulong s = 0, f = rlen;
-	for (ulong i = 0, len = rlen, fmem = 0, smem = 0,
-		   fmem_cap = fn(FMEM_NID), smem_cap = fn(SMEM_NID);
-	     i < len; i++) {
+	ulong fmem = 0, smem = 0, fmem_cap = fn(FMEM_NID),
+	      smem_cap = fn(SMEM_NID);
+	for (ulong i = 0, len = rlen; i < len; i++) {
 		struct mrange *p = mrs[i], *q = mrs[len - 1 - i];
 		if (smem_cap > (smem += p->in_smem + p->in_smem))
 			s += 1;
-		if (fmem_cap > (fmem += q->in_smem + q->in_smem))
+		if (fmem_cap > (fmem += q->in_smem + q->in_smem) &&
+		    q->nr_access > 0)
 			f -= 1;
 	}
 
-	pr_info("%s: rank ranges count=%lu smem=[0, %lu) fmem=[%lu, %lu) smem_cap=%luM fmem_cap=%luM\n",
-		__func__, rt->len, s, f, rt->len,
-		fn(SMEM_NID) << PAGE_SHIFT >> 20,
-		fn(FMEM_NID) << PAGE_SHIFT >> 20);
+	pr_info("%s: rank ranges count=%lu smem=[0, %lu) fmem=[%lu, %lu) smem_cap=%luM fmem_cap=%luM smem=%luM fmem=%luM\n",
+		__func__, rt->len, s, f, rt->len, smem_cap << PAGE_SHIFT >> 20,
+		fmem_cap << PAGE_SHIFT >> 20, smem << PAGE_SHIFT >> 20,
+		fmem << PAGE_SHIFT >> 20);
 	for (ulong i = 0; i < rt->len; i++) {
+		if (i == f)
+			pr_info("%s: promotion candidates starts here\n",
+				__func__);
 		mrange_show(mrs[i]);
+		if (i + 1 == s)
+			pr_info("%s: demotion candidates ends here\n",
+				__func__);
+		if (i + 1 == f)
+			pr_info("%s: candidate matching ends here\n", __func__);
 	}
 
-	// isolate folios based on the ranges above
-	for (ulong i = 0; i <= s; i++) {
-		struct mrange *r = mrs[i];
-		ulong total = r->in_fmem;
-		ulong got = rt_isolate(mm, r, FMEM_NID, manage_folio, demo);
-		// TODO: count the isolated folios
-	}
-	for (ulong i = f; i < rlen; i++) {
+	// isolate all promotion candidates first
+	ulong candidates = 0;
+	for (ulong i = rlen - 1; i >= f; --i) {
 		struct mrange *r = mrs[i];
 		ulong total = r->in_smem;
-		ulong got = rt_isolate(mm, r, SMEM_NID, manage_folio, promo);
+		ulong got = rt_isolate(mm, r, SMEM_NID, ULONG_MAX, manage_folio,
+				       promo);
+		candidates += got;
+	}
+	// isolate demotion candidate to match the promotion
+	ulong matched = 0;
+	for (ulong i = 0; matched < candidates && i < f; i++) {
+		struct mrange *r = mrs[i];
+		ulong total = r->in_fmem;
+		ulong got = rt_isolate(mm, r, FMEM_NID, candidates - matched,
+				       manage_folio, demo);
+		matched += got;
 	}
 
 	// send exchange request
@@ -392,6 +413,9 @@ noinline static int policy_send_exch_reqs(struct policy_worker *data,
 		.promotion = promo,
 		.demotion = demo,
 	};
+	pr_info("%s: exchange request sent promotion=%luM demotion=%luM\n",
+		__func__, candidates << PAGE_SHIFT >> 20,
+		matched << PAGE_SHIFT >> 20);
 	if (mpsc_send(excg_req, &req, sizeof(req)) < 0) {
 		pr_err("%s: discard exchange request due to ring buffer overflow\n",
 		       __func__);
@@ -457,6 +481,31 @@ ulong __node_present_pages(int nid)
 }
 EXPORT_SYMBOL_GPL(__node_present_pages);
 
+static void mm_show_layout(struct mm_struct *mm)
+{
+	if (mm->start_code > mm->start_brk) {
+		pr_info("%s: code/data is above heap: start_code=%#lx start_brk=%#lx\n",
+			__func__, mm->start_code, mm->start_brk);
+	} else {
+		pr_info("%s: code/data is below heap : start_brk=%#lx start_code=%#lx\n",
+			__func__, mm->start_brk, mm->start_code);
+	}
+	// clang-format off
+	pr_info("%s: mmap_legacy_base=%#lx ", __func__, mm->mmap_legacy_base);
+	if (mm->start_code > mm->start_brk) {
+		pr_cont("start_brk=%#lx brk=%#lx ", mm->start_brk, mm->brk);
+		pr_cont("start_code=%#lx end_code=%#lx start_data=%#lx end_data=%#lx ",
+			mm->start_code, mm->end_code, mm->start_data, mm->end_data);
+	} else {
+		pr_cont("start_code=%#lx end_code=%#lx start_data=%#lx end_data=%#lx ",
+			mm->start_code, mm->end_code, mm->start_data, mm->end_data);
+		pr_cont("start_brk=%#lx brk=%#lx ", mm->start_brk, mm->brk);
+	}
+	pr_cont("mmap_base=%#lx start_stack=%#lx arg_start=%#lx arg_end=%#lx env_start=%#lx env_end=%#lx\n",
+		mm->mmap_base, mm->start_stack, mm->arg_start, mm->arg_end, mm->env_start, mm->env_end);
+	// clang-format on
+}
+
 noinline static int worker_policy(struct target *self)
 {
 	// Shared data
@@ -471,13 +520,22 @@ noinline static int worker_policy(struct target *self)
 	{
 		CLASS(task_mm, mm)(self->victim);
 		BUG_ON(IS_ERR_OR_NULL(mm));
-		BUG_ON(rt_init(&rt, mm->start_brk, mm->mmap_base));
+		mm_show_layout(mm);
+		struct sysinfo meminfo = {};
+		si_meminfo(&meminfo);
+		ulong coverage =
+			RMT_INITIAL_SIZE_FACTOR *
+			ALIGN(meminfo.totalram * meminfo.mem_unit, 1 << 30);
+		// heap region
+		ulong start = ALIGN_DOWN(mm->start_brk, 1 << 30);
+		BUG_ON(rt_init(&rt, start, start + coverage));
+		// mmap region
+		// mmap assigns addresses in a topdown manner starting at mmap_base
+		// see: generic_get_unmapped_area_topdown()
+		ulong end = ALIGN(mm->mmap_base, 1 << 30);
+		BUG_ON(rt_insert(&rt, end - coverage, end));
 		rt_show(&rt);
-		pr_info("%s: mm_struct layout start_code=%#lx end_code=%#lx start_data=%#lx end_data=%#lx start_brk=%#lx brk=%#lx start_stack=%#lx arg_start=%#lx arg_end=%#lx env_start=%#lx env_end=%#lx mmap_base=%#lx mmap_legacy_base=%#lx\n",
-			__func__, mm->start_code, mm->end_code, mm->start_data,
-			mm->end_data, mm->start_brk, mm->brk, mm->start_stack,
-			mm->arg_start, mm->arg_end, mm->env_start, mm->env_end,
-			mm->mmap_base, mm->mmap_legacy_base);
+		BUG_ON(rt.len == 0);
 	}
 	__cleanup(kmalloc_cleanup) struct mrange **mrs =
 		TRY(kcalloc(RTREE_MAX_SIZE, sizeof(*mrs), GFP_KERNEL));
@@ -505,7 +563,7 @@ noinline static int worker_policy(struct target *self)
 	DEFINE_RATELIMIT_STATE(report_rs, msecs_to_jiffies(500), 1);
 
 	u64 sample_count = 0, excg_req_count = 0, excg_rsp_count = 0,
-	    report_period = 50000, next_report = report_period,
+	    report_period = 1 << 20, next_report = report_period,
 	    initial_backoff = 500, backoff = initial_backoff;
 	while (!kthread_should_stop()) {
 		int which = mpsc_select3(excg_rsp, splt_req, samplech);
@@ -574,7 +632,7 @@ noinline static int migration_handle_req(struct exch_req *req,
 	struct list_head *p = req->promotion, *d = req->demotion;
 	LIST_HEAD(promotion_done);
 	LIST_HEAD(demotion_done);
-	ulong success = 0, failure = 0;
+	ulong success = 0, failure = 0, blacklist = 0;
 	while (!list_empty(p) && !list_empty(d)) {
 		// fifo order
 		struct folio *folio0 = list_entry(p->next, struct folio, lru),
@@ -586,8 +644,10 @@ noinline static int migration_handle_req(struct exch_req *req,
 			HashMapU64U64_Iter iter =
 				HashMapU64U64_find(bset, &pfn);
 			HashMapU64U64_Entry *e = HashMapU64U64_Iter_get(&iter);
-			if (++e->val > MIGRATION_BSET_BACKOFF)
+			if (++e->val > MIGRATION_BSET_BACKOFF) {
 				HashMapU64U64_erase(bset, &pfn);
+				--blacklist;
+			}
 			list_move_tail(p->next, &promotion_done);
 			continue;
 		}
@@ -597,6 +657,7 @@ noinline static int migration_handle_req(struct exch_req *req,
 			CHECK_INSERTED(HashMapU64U64_insert(bset, &e), true,
 				       "cannot blacklist folio0 pfn=0x%lx",
 				       folio_pfn(folio0));
+			++blacklist;
 			continue;
 		}
 
@@ -605,8 +666,10 @@ noinline static int migration_handle_req(struct exch_req *req,
 			HashMapU64U64_Iter iter =
 				HashMapU64U64_find(bset, &pfn);
 			HashMapU64U64_Entry *e = HashMapU64U64_Iter_get(&iter);
-			if (++e->val > MIGRATION_BSET_BACKOFF)
+			if (++e->val > MIGRATION_BSET_BACKOFF) {
 				HashMapU64U64_erase(bset, &pfn);
+				--blacklist;
+			}
 			list_move_tail(d->next, &demotion_done);
 			continue;
 		}
@@ -616,6 +679,7 @@ noinline static int migration_handle_req(struct exch_req *req,
 			CHECK_INSERTED(HashMapU64U64_insert(bset, &e), true,
 				       "cannot blacklist folio1 pfn=0x%lx",
 				       folio_pfn(folio1));
+			++blacklist;
 			continue;
 		}
 
@@ -635,6 +699,7 @@ noinline static int migration_handle_req(struct exch_req *req,
 			CHECK_INSERTED(HashMapU64U64_insert(bset, &e), true,
 				       "cannot blacklist folio0 pfn=0x%lx",
 				       folio_pfn(folio0));
+			++blacklist;
 			break;
 		}
 		case -ENOTSUPP + 1: {
@@ -644,6 +709,7 @@ noinline static int migration_handle_req(struct exch_req *req,
 			CHECK_INSERTED(HashMapU64U64_insert(bset, &e), true,
 				       "cannot blacklist folio1 pfn=0x%lx",
 				       folio_pfn(folio1));
+			++blacklist;
 			break;
 		}
 		case 0:
@@ -657,7 +723,8 @@ noinline static int migration_handle_req(struct exch_req *req,
 			break;
 		}
 	}
-	pr_info("%s: success=%lu failure=%lu\n", __func__, success, failure);
+	pr_info("%s: success=%lu failure=%lu blacklist=%lu\n", __func__,
+		success, failure, blacklist);
 
 	// FIXME: handle the remaining folios via the old-fashioned
 	// migrate_pages when the two lists are not balanced
@@ -702,6 +769,10 @@ noinline static int worker_migration(struct target *self)
 	HashMapU64U64 __cleanup(HashMapU64U64_destroy)
 		bset = HashMapU64U64_new(MIGRATION_BSET_BUCKET);
 	extern ulong node_balloon_pages(int nid);
+	// ulong (*fn)(int) = symbol_get(node_balloon_pages);
+	// BUG_ON(!fn);
+	// pr_info("%s: symbol_get(node_balloon_pages)=%pe\n", __func__,
+	// 	ERR_PTR((long)fn));
 
 	u64 excg_count = 0, report_period = 500, next_report = report_period;
 	// reporting is rate limited to every 1000ms
@@ -737,7 +808,7 @@ noinline static int worker_migration(struct target *self)
 		}
 	}
 
-	symbol_put(node_avail_pages);
+	// symbol_put_addr(fn);
 	worker_farewell(current);
 	return 0;
 }
@@ -829,8 +900,8 @@ struct target *target_new(pid_t pid)
 			return ERR_CAST(e);
 		}
 		self->events[i] = e;
-		pr_info("%s: created config=0x%llx sample_period=%lld\n",
-			__func__, event_attrs[i].config,
+		pr_info("%s: created config=%#llx config1=%#llx sample_period=%lld\n",
+			__func__, event_attrs[i].config, event_attrs[i].config1,
 			event_attrs[i].sample_period);
 	}
 	BUILD_BUG_ON(ARRAY_SIZE(target_stat_name) != MAX_STATS);

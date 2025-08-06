@@ -10,10 +10,10 @@
 #define SMEM_NODE (NODE_DATA(SMEM_NID))
 
 enum module_param_defaults {
-	LOAD_LATENCY_SAMPLE_PERIOD = 8191,
-	LOAD_LATENCY_THRESHOLD = 64,
+	LOAD_LATENCY_SAMPLE_PERIOD = 4093,
+	LOAD_LATENCY_THRESHOLD = 60,
 	RETIRED_STORES_SAMPLE_PERIOD = 65535,
-	LOAD_L3_MISS_SAMPLE_PERIOD = 8191,
+	LOAD_L3_MISS_SAMPLE_PERIOD = 4093,
 	SDS_WIDTH_AUTO = 8192,
 	SDS_DEPTH = 4,
 	ASYNCHRONOUS_ARCHITECTURE = true,
@@ -21,6 +21,16 @@ enum module_param_defaults {
 	THROTTLE_PULSE_WIDTH_MS = 0,
 	THROTTLE_PULSE_PERIOD_MS = 5000,
 	SPLI_PERIOD_MS = 500,
+};
+enum rtree_param_defaults {
+	RTREE_SPLIT_N = 2,
+	RTREE_GRANULARITY = 2ul << 20,
+	RTREE_SIGNIFICANCE_FACTOR = 2,
+	// TODO: make this value configurable and adaptive
+	RTREE_SPLIT_THRESH = 15,
+	RTREE_EXCH_THRESH = RTREE_GRANULARITY,
+	RTREE_MAX_SIZE = 2048,
+	RTREE_COOL_AGE = 3,
 };
 enum event_config {
 	MEM_TRANS_RETIRED_LOAD_LATENCY = 0x01cd,
@@ -40,6 +50,8 @@ extern ulong retired_stores_sample_period;
 extern ulong throttle_pulse_width_ms;
 extern ulong throttle_pulse_period_ms;
 extern ulong split_period_ms;
+extern ulong rtree_split_thresh;
+extern ulong rtree_exch_thresh;
 
 extern struct kmem_cache *list_head_cache;
 

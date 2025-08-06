@@ -7,16 +7,6 @@
 
 #include "module.h"
 #include "error.h"
-enum {
-	RTREE_SPLIT_N = 2,
-	RTREE_GRANULARITY = 2ul << 20,
-	RTREE_SIGNIFICANCE_FACTOR = 2,
-	// TODO: make this value configurable and adaptive
-	RTREE_SPLIT_THRESH = 500,
-	RTREE_EXCH_THRESH = RTREE_GRANULARITY,
-	RTREE_MAX_SIZE = 2048,
-	RTREE_COOL_AGE = 3,
-};
 
 struct mrange {
 	ulong start, end;
@@ -84,6 +74,7 @@ struct range_tree {
 noinline static inline int rt_init(struct range_tree *self, ulong start,
 				   ulong end)
 {
+	pr_info("%s: start=%#lx end=%#lx\n", __func__, start, end);
 	BUILD_BUG_ON(RTREE_GRANULARITY < PAGE_SIZE);
 	start = round_down(start, RTREE_GRANULARITY);
 	end = round_up(end, RTREE_GRANULARITY);
@@ -108,6 +99,7 @@ noinline static inline void rt_drop(struct range_tree *self)
 
 noinline static inline void rt_show(struct range_tree *self)
 {
+	return;
 	pr_info("%s: managed range count=%lu age=%lu\n", __func__, self->len,
 		self->age);
 	struct mrange *r;
@@ -127,11 +119,25 @@ noinline static inline int rt_count(struct range_tree *self, ulong addr)
 	if (!r || r->start > addr) {
 		pr_err_ratelimited("%s: address %#lx is not in any range\n",
 				   __func__, addr);
-		return -ECNOTCARE;
+		return PEBS_NR_DISCARDED_ERROR - PEBS_NR_DISCARDED;
 	}
 	r->nr_access += 1;
 	return 0;
 }
+
+noinline static inline int rt_insert(struct range_tree *self, ulong start,
+				   ulong end)
+{
+	pr_info("%s: start=%#lx end=%#lx\n", __func__, start, end);
+	start = round_down(start, RTREE_GRANULARITY);
+	end = round_up(end, RTREE_GRANULARITY);
+	UNWRAP(mtree_insert_range(&self->tree, start, end - 1,
+				  UNWRAP(mrange_new(start, end, self->age, 0)),
+				  GFP_KERNEL));
+	self->len += 1;
+	return 0;
+}
+
 
 // Split a managed range if its access count is sigificanitly higher than the
 // neighboring ranges.
@@ -140,7 +146,8 @@ noinline static inline int rt_split(struct range_tree *self)
 	ulong start = 0;
 	for (struct mrange *curr = mt_find(&self->tree, &start, ULONG_MAX);
 	     curr; curr = mt_find_after(&self->tree, &start, ULONG_MAX)) {
-		curr->nr_access /= 2;
+		// TODO: fine tune a better decaying factor
+		curr->nr_access = curr->nr_access / 2;
 	}
 	start = 0;
 	for (struct mrange *
@@ -151,19 +158,19 @@ noinline static inline int rt_split(struct range_tree *self)
 		    next = mt_find_after(&self->tree, &start, ULONG_MAX)) {
 		if (curr->end - curr->start < RTREE_SPLIT_N * RTREE_GRANULARITY)
 			continue;
-		if (curr->nr_access < RTREE_SPLIT_THRESH)
+		if (curr->nr_access < rtree_split_thresh * num_online_cpus())
 			continue;
 		// We should allow:
 		// 1. the root node which has no neighbors
 		// 2. curr->nr_access larger than at least one of its neighbors
 		int score = !prev && !next;
 		if (prev &&
-		    prev->nr_access + RTREE_SPLIT_THRESH *
+		    prev->nr_access + rtree_split_thresh * num_online_cpus() *
 					      RTREE_SIGNIFICANCE_FACTOR <
 			    curr->nr_access)
 			score += 1;
 		if (next &&
-		    next->nr_access + RTREE_SPLIT_THRESH *
+		    next->nr_access + rtree_split_thresh * num_online_cpus() *
 					      RTREE_SIGNIFICANCE_FACTOR <
 			    curr->nr_access)
 			score += 1;
@@ -174,7 +181,7 @@ noinline static inline int rt_split(struct range_tree *self)
 			curr->start, curr->end);
 		!prev ?: mrange_show(prev);
 		mrange_show(curr);
-		!next ?: mrange_show(prev);
+		!next ?: mrange_show(next);
 		// rt_show(self);
 		// Split the range
 		BUG_ON(mtree_erase(&self->tree, curr->start) != curr);
@@ -223,19 +230,14 @@ static inline bool rt_should_cool(struct range_tree const *self,
 
 static inline int rt_rank_cmp(const void *a, const void *b, const void *pri)
 {
-	struct range_tree const *self = pri;
+	// struct range_tree const *self = pri;
 	struct mrange const *ra = *(struct mrange **)a,
 			    *rb = *(struct mrange **)b;
-	// Sort by the access frequency in descending order
-	// return rt_should_cool(self, ra) - rt_should_cool(self, rb) ?:
-	// 	       (mrange_freq(ra) - mrange_freq(rb) ?:
-	// 			-((long)ra->in_fmem + ra->in_smem -
-	// 			  rb->in_fmem - rb->in_smem));
-	return rt_should_cool(self, ra) - rt_should_cool(self, rb) ?:
-		       ra->nr_access - rb->nr_access		   ?:
-		       // -((long)ra->end - ra->start + rb->end - rb->start) ?:
-		       -((long)ra->in_fmem + ra->in_smem - rb->in_fmem -
-			 rb->in_smem);
+	// Comparison priority: freq >> age >> -(in_fmem + in_smem)
+	// Comparison priority: freq >> age
+	return mrange_freq(ra) - mrange_freq(rb)     ?:
+		       ra->nr_access - rb->nr_access ?:
+						       ra->age - rb->age;
 }
 
 // See: for_each_vma_range
@@ -289,8 +291,7 @@ noinline static inline int rt_rank(struct range_tree *self,
 		}
 	}
 
-	// ~~Comparison priority: rt_should_cool >> mrange_freq >> -(in_fmem + in_smem)~~
-	// Comparison priority: rt_should_cool >> nr_access >> -(in_fmem + in_smem)
+	// Comparison priority: freq >> age >> -(in_fmem + in_smem)
 	// Sort order: ascending
 	sort_r(out, self->len, sizeof(*out), rt_rank_cmp, NULL, self);
 
@@ -308,7 +309,7 @@ noinline static inline int rt_rank(struct range_tree *self,
 // isolate the folios that are on the given node using the provided function to
 // the given list
 noinline static inline int
-rt_isolate(struct mm_struct *locked_mm, struct mrange *r, int nid,
+rt_isolate(struct mm_struct *locked_mm, struct mrange *r, int nid, ulong need,
 	   int (*isolate)(struct list_head *list, struct folio *folio),
 	   struct list_head *list)
 {
@@ -321,6 +322,9 @@ rt_isolate(struct mm_struct *locked_mm, struct mrange *r, int nid,
 				continue;
 			}
 			success += isolate(list, folio) == 0;
+			if (success >= need) {
+				return success;
+			}
 		}
 	}
 	return success;

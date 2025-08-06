@@ -75,6 +75,8 @@ static ssize_t pid_store(struct kobject *kobj, struct kobj_attribute *attr,
 		mutex_unlock(&hagent_sysfs_lock);
 		return count;
 	}
+	// Wait a while to avoid conflict with userspace initialization
+	schedule_timeout_interruptible(msecs_to_jiffies(2000));
 	struct target *target = target_new(pid);
 	if (IS_ERR(target)) {
 		mutex_unlock(&hagent_sysfs_lock);
